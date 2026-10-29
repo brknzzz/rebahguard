@@ -1,11 +1,29 @@
 """NODE 3: RebahGuard FSM & multisensor fusion rules (pure Python, no MQTT dependency)."""
 
 from dataclasses import dataclass
+import math
 import time
 from typing import Any
 
-from shared.config import DetectorConfig
+from shared.config import DetectorConfig, LANDSCAPE, PORTRAIT
 from shared.messages import AlertMessage, ControlCommand, StatusMessage, Telemetry
+
+
+def lean_from_features(overhead_deg: float, roll_deg: float) -> float | None:
+    """Rekonstruksi in-plane lean (0=portrait, 90=landscape) dari telemetry.
+
+    roll_deg = atan2(|ax|, sqrt(ay^2+az^2)), overhead_deg = acos(az/g).
+    |ax| = g*sin(r), |az| = g*|cos(t)|  ->  |ay| = g*sqrt(cos^2 r - cos^2 t).
+    Return None kalau HP hampir datar (lean tidak valid).
+    """
+    r = math.radians(roll_deg)
+    t = math.radians(overhead_deg)
+    ay_sq = math.cos(r) ** 2 - math.cos(t) ** 2
+    ax = math.sin(r)
+    ay = math.sqrt(max(0.0, ay_sq))
+    if ax < 1e-6 and ay < 1e-6:
+        return None
+    return math.degrees(math.atan2(ax, ay))
 
 
 @dataclass(frozen=True)
@@ -24,6 +42,10 @@ class RebahDetector:
         self.reason: str = "Menunggu telemetry dari Edge 1"
 
         self.in_lying_zone: bool = False
+        self.orientation: str = PORTRAIT
+        self._pending_orientation: str | None = None
+        self._pending_since_ms: int = 0
+        self.active_limit_sec: float = self.config.lying_limit_sec
         self.lying_elapsed_sec: float = 0.0
         self.nagging_active: bool = False
         self.alert_active: bool = False
@@ -161,6 +183,32 @@ class RebahDetector:
 
         return Decision(self.status, self.reason)
 
+    def _update_orientation(self, data: Telemetry, current_ms: int) -> str:
+        cfg = self.config
+        if not cfg.use_roll:
+            self.orientation = PORTRAIT
+            return self.orientation
+        tilt = data.overhead_deg
+        if tilt < cfg.flat_gate_deg or tilt > 180.0 - cfg.flat_gate_deg:
+            return self.orientation  # hampir datar: lean tidak valid, tahan
+        lean = lean_from_features(tilt, data.roll_deg)
+        if lean is None:
+            return self.orientation
+        if self.orientation == LANDSCAPE:
+            raw = PORTRAIT if lean < cfg.roll_exit_deg else LANDSCAPE
+        else:
+            raw = LANDSCAPE if lean >= cfg.roll_enter_deg else PORTRAIT
+        if raw == self.orientation:
+            self._pending_orientation = None
+            return self.orientation
+        if self._pending_orientation != raw:
+            self._pending_orientation = raw
+            self._pending_since_ms = current_ms
+        if (current_ms - self._pending_since_ms) >= cfg.orientation_confirm_sec * 1000:
+            self.orientation = raw
+            self._pending_orientation = None
+        return self.orientation
+
     def _accept_edge2(self, data: Telemetry, current_ms: int) -> Decision:
         self.last_edge2_ms = current_ms
 
@@ -236,11 +284,15 @@ class RebahDetector:
             self.reason = "Monitoring ditunda sementara (SNOOZED)"
             return Decision(self.status, self.reason, parent_alert=None, child_alert=clear_msg)
 
-        # Klasifikasi postur Edge 1 dengan histeresis
+        # Klasifikasi postur Edge 1: orientasi (portrait/landscape) -> threshold per orientasi
+        orientation = self._update_orientation(data, current_ms)
+        th = self.config.thresholds_for(orientation)
+        self.active_limit_sec = th.lying_limit_sec
+
         is_face_down_table = (
             data.overhead_deg >= self.config.face_down_deg
-            and data.motion_rms <= self.config.still_motion_max
-            and data.gyro_rms <= self.config.still_gyro_max
+            and data.motion_rms <= th.still_motion_max
+            and data.gyro_rms <= th.still_gyro_max
         )
 
         if is_face_down_table:
@@ -251,18 +303,11 @@ class RebahDetector:
             self.reason = "HP ditaruh telungkup diam di permukaan meja"
             return Decision(self.status, self.reason, parent_alert=None, child_alert=clear_msg)
 
-        enter_cond = (data.overhead_deg >= self.config.overhead_enter_deg) or (
-            self.config.use_roll and data.roll_deg >= self.config.roll_enter_deg
-        )
-        exit_cond = (data.overhead_deg <= self.config.overhead_exit_deg) and (
-            (not self.config.use_roll) or data.roll_deg <= self.config.roll_exit_deg
-        )
-
-        if enter_cond:
-            self.in_lying_zone = True
-        elif exit_cond:
-            self.in_lying_zone = False
-        # Di zona abu-abu (antara exit dan enter), pertahankan nilai self.in_lying_zone sebelumnya
+        # Histeresis sudut: roll TIDAK lagi memicu rebahan sendiri, hanya memilih threshold.
+        if self.in_lying_zone:
+            self.in_lying_zone = data.overhead_deg > th.exit_deg
+        else:
+            self.in_lying_zone = data.overhead_deg >= th.enter_deg
 
         if not self.in_lying_zone:
             self.lying_elapsed_sec = 0.0
@@ -295,7 +340,7 @@ class RebahDetector:
                 )
             return Decision(self.status, self.reason, parent_alert=None, child_alert=child_alert)
 
-        if self.lying_elapsed_sec >= self.config.lying_limit_sec:
+        if self.lying_elapsed_sec >= self.active_limit_sec:
             first_entry = not self.alert_active
             cooldown_ready = (
                 self.last_alert_ms is None
@@ -304,7 +349,7 @@ class RebahDetector:
             self.alert_active = True
             self.status = "ALERT_MATA"
             self.reason = (
-                f"Rebahan melebihi batas ({self.lying_elapsed_sec:.1f}s >= {self.config.lying_limit_sec:.1f}s)"
+                f"Rebahan melebihi batas ({self.lying_elapsed_sec:.1f}s >= {self.active_limit_sec:.1f}s)"
             )
             parent_alert = None
             child_alert = None
@@ -328,7 +373,7 @@ class RebahDetector:
 
         self.status = "REBAHAN_AKTIF"
         self.reason = (
-            f"Terdeteksi rebahan ({self.lying_elapsed_sec:.1f}s / {self.config.lying_limit_sec:.1f}s)"
+            f"Terdeteksi rebahan ({self.lying_elapsed_sec:.1f}s / {self.active_limit_sec:.1f}s)"
         )
         return Decision(self.status, self.reason, parent_alert=None, child_alert=None)
 
@@ -355,7 +400,7 @@ class RebahDetector:
             armed=self.armed,
             nagging_active=self.nagging_active,
             lying_elapsed_sec=round(self.lying_elapsed_sec, 4),
-            lying_limit_sec=self.config.lying_limit_sec,
+            lying_limit_sec=self.active_limit_sec,
             edge1_online=self.is_edge1_online(current_ms),
             edge2_online=self.is_edge2_online(current_ms),
             at_ms=current_ms,

@@ -262,7 +262,7 @@
     </p>
     <form id="conn-form">
       <label>WebSocket URL <input id="url" value="wss://broker.hivemq.com:8884/mqtt" required></label>
-      <label>PROJECT_ID <input id="project" placeholder="kelas_iot_demo" required></label>
+      <label>PROJECT_ID <input id="project" placeholder="iot_kelompok_14" required></label>
       <label>Username <input id="username" autocomplete="username"></label>
       <label>Password <input id="password" type="password" autocomplete="current-password"></label>
       <div class="row">
@@ -338,15 +338,48 @@
   </div>
 
   <!-- GRAFIK REAL-TIME OVERHEAD_DEG & HISTERESIS -->
-  <section class="card" aria-labelledby="h-chart">
-    <h2 id="h-chart">Grafik Real-Time Sudut Overhead HP Anak (60 Poin Terakhir)</h2>
-    <div class="legend">
-      <span><span class="swatch" style="background:var(--edge1)"></span>Overhead Angle (°) — Edge 1</span>
-      <span><span class="swatch" style="background:var(--enter-line)"></span>Garis Masuk Rebahan (<code id="legend-enter">120°</code>)</span>
-      <span><span class="swatch" style="background:var(--exit-line)"></span>Garis Keluar / Histeresis (<code id="legend-exit">105°</code>)</span>
-    </div>
-    <canvas id="chart" role="img" aria-label="Grafik riwayat overhead_deg dan garis histeresis"></canvas>
-  </section>
+<section class="card" aria-labelledby="h-chart">
+  <h2 id="h-chart">
+    Grafik Real-Time Sudut Overhead HP Anak (60 Poin Terakhir)
+  </h2>
+
+  <div class="legend">
+    <span>
+      <span class="swatch" style="background:var(--edge1)"></span>
+      Overhead Angle (°) — Edge 1
+    </span>
+
+    <span>
+      <span class="swatch" style="background:var(--enter-line)"></span>
+      Portrait — Garis Masuk Rebahan
+      (<code id="legend-enter">110°</code>)
+    </span>
+
+    <span>
+      <span class="swatch" style="background:var(--exit-line)"></span>
+      Portrait — Garis Keluar Rebahan
+      (<code id="legend-exit">95°</code>)
+    </span>
+
+    <span>
+      <span class="swatch" style="background:#9b59b6"></span>
+      Landscape — Garis Masuk Rebahan
+      (<code id="legend-landscape-enter">80°</code>)
+    </span>
+
+    <span>
+      <span class="swatch" style="background:#e67e22"></span>
+      Landscape — Garis Keluar Rebahan
+      (<code id="legend-landscape-exit">70°</code>)
+    </span>
+  </div>
+
+  <canvas
+    id="chart"
+    role="img"
+    aria-label="Grafik riwayat overhead_deg dengan empat garis threshold portrait dan landscape"
+  ></canvas>
+</section>
 
   <!-- PANEL MODE KALIBRASI & LIVE TUNING THRESHOLD -->
   <details class="card" id="calib-panel">
@@ -359,7 +392,7 @@
         </p>
         <form id="config-form">
           <label>overhead_enter_deg (°)
-            <input id="cfg-overhead_enter_deg" type="number" step="0.5" min="10" max="180" value="120" required>
+            <input id="cfg-overhead_enter_deg" type="number" step="0.5" min="10" max="180" value="110" required>
           </label>
           <label>overhead_exit_deg (°)
             <input id="cfg-overhead_exit_deg" type="number" step="0.5" min="5" max="175" value="105" required>
@@ -845,20 +878,41 @@ function drawChart() {
     ctx.fillText(`${deg}°`, 4, y(deg) + 4);
   }
 
-  // Garis putus-putus histeresis: overhead_enter_deg & overhead_exit_deg
+  // Empat garis threshold: 2 portrait + 2 landscape
+  const portraitEnter = activeConfig.overhead_enter_deg;
+  const portraitExit = activeConfig.overhead_exit_deg;
+
+  // Threshold khusus landscape (ubah nilainya sesuai kebutuhan)
+  const landscapeEnter = 80;
+  const landscapeExit = 70;
+
   ctx.setLineDash([6, 4]);
   ctx.lineWidth = 1.8;
 
+  // Portrait: garis masuk dan keluar
   ctx.strokeStyle = color("--enter-line");
   ctx.beginPath();
-  ctx.moveTo(pad.left, y(activeConfig.overhead_enter_deg));
-  ctx.lineTo(width - pad.right, y(activeConfig.overhead_enter_deg));
+  ctx.moveTo(pad.left, y(portraitEnter));
+  ctx.lineTo(width - pad.right, y(portraitEnter));
   ctx.stroke();
 
   ctx.strokeStyle = color("--exit-line");
   ctx.beginPath();
-  ctx.moveTo(pad.left, y(activeConfig.overhead_exit_deg));
-  ctx.lineTo(width - pad.right, y(activeConfig.overhead_exit_deg));
+  ctx.moveTo(pad.left, y(portraitExit));
+  ctx.lineTo(width - pad.right, y(portraitExit));
+  ctx.stroke();
+
+  // Landscape: dua garis tambahan dengan warna berbeda
+  ctx.strokeStyle = "#9b59b6";
+  ctx.beginPath();
+  ctx.moveTo(pad.left, y(landscapeEnter));
+  ctx.lineTo(width - pad.right, y(landscapeEnter));
+  ctx.stroke();
+
+  ctx.strokeStyle = "#e67e22";
+  ctx.beginPath();
+  ctx.moveTo(pad.left, y(landscapeExit));
+  ctx.lineTo(width - pad.right, y(landscapeExit));
   ctx.stroke();
 
   ctx.setLineDash([]);
