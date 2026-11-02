@@ -13,6 +13,7 @@ import json
 import threading
 import time
 
+from nodes.posture_service.ml_model import PostureMLClassifier
 from nodes.posture_service.rules import Decision, RebahDetector
 from shared.messages import ControlCommand, StatusMessage, Telemetry
 from shared.mqtt_connection import create_client, topic
@@ -30,6 +31,8 @@ def build_offline_lwt_json(lying_limit_sec: float = 10.0, now_ms: int | None = N
         edge1_online=False,
         edge2_online=False,
         at_ms=current_ms,
+        orientation="portrait",
+        detection_mode="rule",
     ).to_json()
 
 
@@ -136,7 +139,8 @@ class PostureServiceBridge:
 
 
 def main() -> None:
-    detector = RebahDetector()
+    ml_classifier = PostureMLClassifier()
+    detector = RebahDetector(ml_classifier=ml_classifier)
     status_topic = topic("status")
     offline_lwt = build_offline_lwt_json(detector.config.lying_limit_sec)
     client = create_client("posture", will=(status_topic, offline_lwt))
@@ -145,7 +149,7 @@ def main() -> None:
     client.on_connect = bridge.on_connect
     client.on_message = bridge.on_message
 
-    print("[POSTURE] Menjalankan service RebahGuard. Tekan Ctrl+C untuk berhenti.")
+    print("[POSTURE] Menjalankan service RebahGuard (Hybrid ML + FSM). Tekan Ctrl+C untuk berhenti.")
     client.loop_start()
     try:
         while True:
@@ -170,4 +174,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

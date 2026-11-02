@@ -42,13 +42,15 @@ class RebahDetectorTests(unittest.TestCase):
         self.assertTrue(t.endswith("/status"))
 
     def test_landscape_gaming_sitting_does_not_trigger_rebahan(self):
-        # Posisi duduk main game landscape (ax=9.81, ay=0.0, az=2.0) dengan default use_roll=False
+        # Posisi duduk main game landscape (ax=9.81, ay=0.0, az=2.0) dengan default use_roll=True
+        # overhead_deg ~ 78.48 deg (< landscape_overhead_enter_deg=80.0) -> tetap POSISI_DUDUK_SEHAT
         samples = [
             SensorSample(i * 0.2, (9.81, 0.0, 2.0), (0.05, 0.04, 0.02))
             for i in range(5)
         ]
         feat = extract_features(samples)
-        self.assertFalse(self.detector.config.use_roll)
+        self.assertTrue(self.detector.config.use_roll)
+        self.assertLess(feat.overhead_deg, self.detector.config.landscape_overhead_enter_deg)
 
         for i in range(10):
             ts = NOW_MS + i * 2000
@@ -65,6 +67,8 @@ class RebahDetectorTests(unittest.TestCase):
             self.assertEqual(decision.status, "POSISI_DUDUK_SEHAT")
             self.assertNotIn(decision.status, ("REBAHAN_AKTIF", "ALERT_MATA"))
         self.assertEqual(self.detector.lying_elapsed_sec, 0.0)
+        self.assertEqual(self.detector.orientation, "landscape")
+        self.assertEqual(self.detector.build_status(NOW_MS + 18_000).orientation, "landscape")
 
     def test_static_calibration_bias_face_down_table(self):
         # Akselerometer dengan bias kalibrasi statis (az = -9.55 konstan) -> motion_rms == 0.0 -> DITARUH_TELUNGKUP
@@ -75,7 +79,7 @@ class RebahDetectorTests(unittest.TestCase):
         feat = extract_features(samples)
         self.assertEqual(feat.motion_rms, 0.0)
         self.assertEqual(feat.gyro_rms, 0.0)
-        self.assertGreaterEqual(feat.overhead_deg, 145.0)
+        self.assertGreaterEqual(feat.overhead_deg, 175.0)
 
         t = make_telemetry(
             "edge1",
@@ -91,38 +95,83 @@ class RebahDetectorTests(unittest.TestCase):
         self.assertEqual(self.detector.lying_elapsed_sec, 0.0)
 
     def test_hysteresis_gray_zone_preserves_previous_state(self):
-        # 1. Mulai dari duduk sehat (60 deg), lalu masuk zona abu-abu (112 deg, di antara 105..120) -> tetap duduk sehat
+        # 1. Mulai dari duduk sehat (60 deg), lalu masuk zona abu-abu portrait (102 deg, di antara 95..110) -> tetap duduk sehat
         d0 = self.detector.accept(make_telemetry("edge1", 0, overhead_deg=60.0, sent_at_ms=NOW_MS), now_ms=NOW_MS)
         self.assertEqual(d0.status, "POSISI_DUDUK_SEHAT")
 
         d1 = self.detector.accept(
-            make_telemetry("edge1", 1, overhead_deg=112.0, sent_at_ms=NOW_MS + 1000),
+            make_telemetry("edge1", 1, overhead_deg=102.0, sent_at_ms=NOW_MS + 1000),
             now_ms=NOW_MS + 1000,
         )
         self.assertEqual(d1.status, "POSISI_DUDUK_SEHAT")
 
-        # 2. Masuk ke zona rebahan (>= 120 deg, misal 125 deg) -> REBAHAN_AKTIF
+        # 2. Masuk ke zona rebahan (>= 110 deg, misal 120 deg) -> REBAHAN_AKTIF
         d2 = self.detector.accept(
-            make_telemetry("edge1", 2, overhead_deg=125.0, sent_at_ms=NOW_MS + 2000),
+            make_telemetry("edge1", 2, overhead_deg=120.0, sent_at_ms=NOW_MS + 2000),
             now_ms=NOW_MS + 2000,
         )
         self.assertEqual(d2.status, "REBAHAN_AKTIF")
 
-        # 3. Turun ke zona abu-abu (110 deg, antara 105..120) -> tetap REBAHAN_AKTIF (histeresis)
+        # 3. Turun ke zona abu-abu (102 deg, antara 95..110) -> tetap REBAHAN_AKTIF (histeresis)
         d3 = self.detector.accept(
-            make_telemetry("edge1", 3, overhead_deg=110.0, sent_at_ms=NOW_MS + 4000),
+            make_telemetry("edge1", 3, overhead_deg=102.0, sent_at_ms=NOW_MS + 4000),
             now_ms=NOW_MS + 4000,
         )
         self.assertEqual(d3.status, "REBAHAN_AKTIF")
         self.assertGreater(self.detector.lying_elapsed_sec, 0.0)
 
-        # 4. Turun ke <= 105 deg (100 deg) -> keluar ke POSISI_DUDUK_SEHAT
+        # 4. Turun ke <= 95 deg (90 deg) -> keluar ke POSISI_DUDUK_SEHAT
         d4 = self.detector.accept(
-            make_telemetry("edge1", 4, overhead_deg=100.0, sent_at_ms=NOW_MS + 6000),
+            make_telemetry("edge1", 4, overhead_deg=90.0, sent_at_ms=NOW_MS + 6000),
             now_ms=NOW_MS + 6000,
         )
         self.assertEqual(d4.status, "POSISI_DUDUK_SEHAT")
         self.assertEqual(self.detector.lying_elapsed_sec, 0.0)
+
+    def test_orientation_transitions_and_flat_gate_retention(self):
+        # Awalnya portrait
+        self.detector.accept(
+            make_telemetry("edge1", 0, overhead_deg=50.0, roll_deg=5.0, sent_at_ms=NOW_MS),
+            now_ms=NOW_MS,
+        )
+        self.assertEqual(self.detector.build_status(NOW_MS).orientation, "portrait")
+
+        # Putar ke landscape (overhead=75, roll=73 -> lean >= 60), butuh konfirmasi orientation_confirm_sec (0.5s)
+        self.detector.accept(
+            make_telemetry("edge1", 1, overhead_deg=75.0, roll_deg=73.0, sent_at_ms=NOW_MS + 200),
+            now_ms=NOW_MS + 200,
+        )
+        self.assertEqual(self.detector.orientation, "portrait")  # belum 0.5 detik
+
+        self.detector.accept(
+            make_telemetry("edge1", 2, overhead_deg=75.0, roll_deg=73.0, sent_at_ms=NOW_MS + 800),
+            now_ms=NOW_MS + 800,
+        )
+        self.assertEqual(self.detector.build_status(NOW_MS + 800).orientation, "landscape")
+
+        # Saat HP hampir datar (overhead_deg < flat_gate_deg=20.0 atau > 160.0), tahan orientasi sebelumnya (landscape)
+        self.detector.accept(
+            make_telemetry("edge1", 3, overhead_deg=10.0, roll_deg=0.0, sent_at_ms=NOW_MS + 1800),
+            now_ms=NOW_MS + 1800,
+        )
+        self.assertEqual(self.detector.build_status(NOW_MS + 1800).orientation, "landscape")
+
+        self.detector.accept(
+            make_telemetry("edge1", 4, overhead_deg=170.0, roll_deg=0.0, sent_at_ms=NOW_MS + 2800),
+            now_ms=NOW_MS + 2800,
+        )
+        self.assertEqual(self.detector.build_status(NOW_MS + 2800).orientation, "landscape")
+
+        # Kembali ke portrait (overhead=55, roll=5 -> lean < roll_exit_deg=45) setelah >= 0.5s
+        self.detector.accept(
+            make_telemetry("edge1", 5, overhead_deg=55.0, roll_deg=5.0, sent_at_ms=NOW_MS + 3500),
+            now_ms=NOW_MS + 3500,
+        )
+        self.detector.accept(
+            make_telemetry("edge1", 6, overhead_deg=55.0, roll_deg=5.0, sent_at_ms=NOW_MS + 4100),
+            now_ms=NOW_MS + 4100,
+        )
+        self.assertEqual(self.detector.build_status(NOW_MS + 4100).orientation, "portrait")
 
     def test_face_down_and_sitting_both_clear_nagging_and_emit_clear_event(self):
         # Masuk ke REBAHAN_AKTIF lalu picu TEGURAN_ORTU

@@ -6,9 +6,12 @@ import math
 import time
 from typing import Any
 
-from shared.config import DetectorConfig
+from shared.config import DetectorConfig, LANDSCAPE, PORTRAIT
 
 VALID_DEVICES = ("edge1", "edge2")
+VALID_ORIENTATIONS = (PORTRAIT, LANDSCAPE)
+VALID_DETECTION_MODES = ("rule", "ml")
+VALID_POSTURE_LABELS = ("POSISI_DUDUK_SEHAT", "DITARUH_TELUNGKUP", "REBAHAN_AKTIF")
 VALID_ALERT_TARGETS = ("parent", "child")
 VALID_ALERT_EVENTS = ("ALERT_MATA", "TEGURAN_ORTU", "CLEAR")
 VALID_COMMANDS = ("ARM", "DISARM", "SCOLD", "SNOOZE", "RESET", "UPDATE_CONFIG")
@@ -165,6 +168,10 @@ class StatusMessage:
     at_ms: int
     device_id: str | None = None
     sequence: int | None = None
+    orientation: str = PORTRAIT
+    detection_mode: str = "rule"
+    ml_prediction: str | None = None
+    ml_confidence: float | None = None
 
     def __post_init__(self) -> None:
         _require_non_empty_str(self.status, "status")
@@ -186,6 +193,22 @@ class StatusMessage:
                 raise ValueError(f"Invalid device_id: {self.device_id}")
         if self.sequence is not None:
             _require_non_neg_int(self.sequence, "sequence")
+        _require_non_empty_str(self.orientation, "orientation")
+        if self.orientation not in VALID_ORIENTATIONS:
+            raise ValueError(f"Invalid orientation: {self.orientation}")
+        _require_non_empty_str(self.detection_mode, "detection_mode")
+        if self.detection_mode not in VALID_DETECTION_MODES:
+            raise ValueError(f"Invalid detection_mode: {self.detection_mode}")
+        if self.ml_prediction is not None:
+            _require_non_empty_str(self.ml_prediction, "ml_prediction")
+            if self.ml_prediction not in VALID_POSTURE_LABELS:
+                raise ValueError(f"Invalid ml_prediction: {self.ml_prediction}")
+        if self.ml_confidence is not None:
+            object.__setattr__(
+                self,
+                "ml_confidence",
+                _require_finite_float(self.ml_confidence, "ml_confidence", 0.0, 1.0),
+            )
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), allow_nan=False)
@@ -210,6 +233,10 @@ class StatusMessage:
             at_ms=value.get("at_ms"),
             device_id=value.get("device_id"),
             sequence=value.get("sequence"),
+            orientation=value.get("orientation") or "portrait",
+            detection_mode=value.get("detection_mode") or "rule",
+            ml_prediction=value.get("ml_prediction"),
+            ml_confidence=value.get("ml_confidence"),
         )
 
 

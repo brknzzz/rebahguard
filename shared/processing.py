@@ -1,4 +1,4 @@
-"""DATA PROCESSING (used by BOTH edge devices).
+"""DATA PROCESSING (used by BOTH edge devices and ML pipeline).
 
 Processing A: Gravity Orientation Smoothing (overhead_deg & roll_deg).
 Processing B: Mean-Centered Dynamic Motion RMS (calibration-bias-free motion_rms).
@@ -6,11 +6,39 @@ Processing C: Gyroscope Micro-Activity RMS (gyro_rms).
 """
 
 from dataclasses import dataclass
-from math import acos, atan2, degrees, sqrt
+from math import acos, atan2, cos, degrees, radians, sin, sqrt
 
 
 def _clamp(value: float, low: float, high: float) -> float:
     return max(low, min(high, value))
+
+
+def lean_from_features(overhead_deg: float, roll_deg: float) -> float | None:
+    """Rekonstruksi in-plane lean (0=portrait, 90=landscape) dari telemetry.
+
+    roll_deg = atan2(|ax|, sqrt(ay^2+az^2)), overhead_deg = acos(az/g).
+    |ax| = g*sin(r), |az| = g*|cos(t)|  ->  |ay| = g*sqrt(cos^2 r - cos^2 t).
+    Return None kalau HP hampir datar (lean tidak valid).
+    """
+    r = radians(roll_deg)
+    t = radians(overhead_deg)
+    ay_sq = cos(r) ** 2 - cos(t) ** 2
+    ax = sin(r)
+    ay = sqrt(max(0.0, ay_sq))
+    if ax < 1e-6 and ay < 1e-6:
+        return None
+    return degrees(atan2(ax, ay))
+
+
+def safe_lean_deg(overhead_deg: float, roll_deg: float) -> float:
+    """Shared helper for dataset recorder, training, and ML inference.
+
+    Returns 0.0 when lean_from_features(...) is None (phone flat), rounded to 4 decimals.
+    """
+    lean = lean_from_features(overhead_deg, roll_deg)
+    if lean is None:
+        return 0.0
+    return round(lean, 4)
 
 
 @dataclass(frozen=True)

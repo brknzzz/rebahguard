@@ -26,6 +26,10 @@ class MessageSchemaTests(unittest.TestCase):
             at_ms=123456,
             device_id="edge1",
             sequence=4,
+            orientation="portrait",
+            detection_mode="ml",
+            ml_prediction="REBAHAN_AKTIF",
+            ml_confidence=0.925,
         )
         raw = msg.to_json()
         parsed = StatusMessage.from_json(raw)
@@ -45,8 +49,96 @@ class MessageSchemaTests(unittest.TestCase):
                 "at_ms": 123456,
                 "device_id": "edge1",
                 "sequence": 4,
+                "orientation": "portrait",
+                "detection_mode": "ml",
+                "ml_prediction": "REBAHAN_AKTIF",
+                "ml_confidence": 0.925,
             },
         )
+
+    def test_status_message_backward_compatible_and_ml_validation(self):
+        legacy_payload = json.dumps(
+            {
+                "status": "POSISI_DUDUK_SEHAT",
+                "reason": "Posisi sehat",
+                "armed": True,
+                "nagging_active": False,
+                "lying_elapsed_sec": 0.0,
+                "lying_limit_sec": 10.0,
+                "edge1_online": True,
+                "edge2_online": False,
+                "at_ms": 123456,
+                "device_id": "edge1",
+                "sequence": 1,
+            }
+        )
+        parsed = StatusMessage.from_json(legacy_payload)
+        self.assertEqual(parsed.orientation, "portrait")
+        self.assertEqual(parsed.detection_mode, "rule")
+        self.assertIsNone(parsed.ml_prediction)
+        self.assertIsNone(parsed.ml_confidence)
+
+        # Tolak orientasi tidak valid
+        with self.assertRaises(ValueError):
+            StatusMessage(
+                status="POSISI_DUDUK_SEHAT",
+                reason="Invalid orientation",
+                armed=True,
+                nagging_active=False,
+                lying_elapsed_sec=0.0,
+                lying_limit_sec=10.0,
+                edge1_online=True,
+                edge2_online=False,
+                at_ms=123456,
+                orientation="diagonal",
+            )
+
+        # Tolak ml_confidence > 1.0, < 0.0, atau NaN
+        for bad_conf in (1.05, -0.1, float("nan")):
+            with self.assertRaises(ValueError):
+                StatusMessage(
+                    status="REBAHAN_AKTIF",
+                    reason="Bad confidence",
+                    armed=True,
+                    nagging_active=False,
+                    lying_elapsed_sec=2.0,
+                    lying_limit_sec=10.0,
+                    edge1_online=True,
+                    edge2_online=False,
+                    at_ms=123456,
+                    detection_mode="ml",
+                    ml_prediction="REBAHAN_AKTIF",
+                    ml_confidence=bad_conf,
+                )
+
+        # Tolak detection_mode atau ml_prediction tidak valid
+        with self.assertRaises(ValueError):
+            StatusMessage(
+                status="REBAHAN_AKTIF",
+                reason="Bad mode",
+                armed=True,
+                nagging_active=False,
+                lying_elapsed_sec=2.0,
+                lying_limit_sec=10.0,
+                edge1_online=True,
+                edge2_online=False,
+                at_ms=123456,
+                detection_mode="unknown",
+            )
+        with self.assertRaises(ValueError):
+            StatusMessage(
+                status="REBAHAN_AKTIF",
+                reason="Bad label",
+                armed=True,
+                nagging_active=False,
+                lying_elapsed_sec=2.0,
+                lying_limit_sec=10.0,
+                edge1_online=True,
+                edge2_online=False,
+                at_ms=123456,
+                detection_mode="ml",
+                ml_prediction="TIDUR_MIRING",
+            )
 
     def test_alert_message_roundtrip(self):
         alert = AlertMessage(
