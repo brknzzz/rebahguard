@@ -1,6 +1,12 @@
 import unittest
 
-from shared.processing import Features, SensorSample, extract_features
+from shared.processing import (
+    Features,
+    SensorSample,
+    extract_features,
+    lean_from_features,
+    safe_lean_deg,
+)
 
 
 class ProcessingTests(unittest.TestCase):
@@ -23,6 +29,22 @@ class ProcessingTests(unittest.TestCase):
         # az > 0 => overhead_deg < 90 derajat (sekitar 78.48 derajat), roll_deg sekitar 78.48 derajat
         self.assertLess(result.overhead_deg, 90.0)
         self.assertGreater(result.roll_deg, 70.0)
+
+    def test_lean_from_features_and_safe_lean_deg(self):
+        # Saat HP datar (overhead 0 deg atau 180 deg, roll 0 deg) -> lean_from_features None, safe_lean_deg 0.0
+        self.assertIsNone(lean_from_features(0.0, 0.0))
+        self.assertIsNone(lean_from_features(180.0, 0.0))
+        self.assertEqual(safe_lean_deg(0.0, 0.0), 0.0)
+        self.assertEqual(safe_lean_deg(180.0, 0.0), 0.0)
+
+        # Posisi portrait tegak lurus (overhead=60, roll=5) -> lean kecil (< 15 deg)
+        portrait_lean = safe_lean_deg(60.0, 5.0)
+        self.assertGreater(portrait_lean, 0.0)
+        self.assertLess(portrait_lean, 15.0)
+
+        # Posisi landscape (overhead=78.48, roll=78.48) -> lean mendekati 90 deg (>= 60 deg)
+        landscape_lean = safe_lean_deg(78.48, 78.48)
+        self.assertGreaterEqual(landscape_lean, 60.0)
 
     def test_dynamic_movement_and_gyro_rms(self):
         samples = [

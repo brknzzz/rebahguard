@@ -172,6 +172,16 @@
     display: inline-block;
     letter-spacing: 0.02em;
   }
+  #orientation-badge {
+    font-size: 20px;
+    font-weight: 800;
+    margin: 4px 0;
+    padding: 8px 16px;
+    border-radius: 12px;
+    display: inline-block;
+    letter-spacing: 0.04em;
+    border: 2px solid currentColor;
+  }
   .progress-wrap {
     margin: 14px 0 6px;
     background: var(--bg);
@@ -282,7 +292,11 @@
       </div>
     </div>
     <div style="margin-top:8px">
-      <div id="status-badge" class="off">WAITING</div>
+      <div class="row">
+        <div id="status-badge" class="off">WAITING</div>
+        <div id="orientation-badge" class="info">PORTRAIT</div>
+        <span id="engine-badge" class="pill off">Rule-Based</span>
+      </div>
       <p id="status-reason" class="muted" style="margin:4px 0 0">Menunggu pesan dari topic status…</p>
     </div>
 
@@ -313,6 +327,8 @@
         <span id="edge1-state" class="pill off">Offline</span>
       </div>
       <dl>
+        <dt>Orientasi Layar</dt><dd id="edge1-orientation">PORTRAIT</dd>
+        <dt>Prediksi AI</dt><dd id="edge1-ai">Rule-Based (Fallback)</dd>
         <dt>Sudut Overhead (Pitch/Tilt)</dt><dd id="edge1-overhead">— °</dd>
         <dt>Sudut Kemiringan (Roll)</dt><dd id="edge1-roll">— °</dd>
         <dt>Gerakan Dinamis (motion_rms)</dt><dd id="edge1-motion">— m/s²</dd>
@@ -395,10 +411,10 @@
             <input id="cfg-overhead_enter_deg" type="number" step="0.5" min="10" max="180" value="110" required>
           </label>
           <label>overhead_exit_deg (°)
-            <input id="cfg-overhead_exit_deg" type="number" step="0.5" min="5" max="175" value="105" required>
+            <input id="cfg-overhead_exit_deg" type="number" step="0.5" min="5" max="175" value="95" required>
           </label>
           <label>face_down_deg (°)
-            <input id="cfg-face_down_deg" type="number" step="0.5" min="90" max="180" value="145" required>
+            <input id="cfg-face_down_deg" type="number" step="0.5" min="90" max="180" value="175" required>
           </label>
           <label>lying_limit_sec (detik)
             <input id="cfg-lying_limit_sec" type="number" step="0.5" min="1" max="600" value="10" required>
@@ -407,7 +423,7 @@
             <input id="cfg-still_motion_max" type="number" step="0.005" min="0.001" max="5" value="0.05" required>
           </label>
           <label>still_gyro_max (rad/s)
-            <input id="cfg-still_gyro_max" type="number" step="0.005" min="0.001" max="5" value="0.015" required>
+            <input id="cfg-still_gyro_max" type="number" step="0.005" min="0.001" max="5" value="0.05" required>
           </label>
           <label>shake_motion_min (m/s²)
             <input id="cfg-shake_motion_min" type="number" step="0.1" min="0.1" max="30" value="2.0" required>
@@ -427,9 +443,19 @@
           <label>roll_enter_deg (°)
             <input id="cfg-roll_enter_deg" type="number" step="0.5" min="15" max="175" value="60" required>
           </label>
+          <label>ml_confidence_min (0.1–1.0)
+            <input id="cfg-ml_confidence_min" type="number" step="0.05" min="0.05" max="1.0" value="0.55" required>
+          </label>
+          <label>ml_smoothing_window (1–9)
+            <input id="cfg-ml_smoothing_window" type="number" step="1" min="1" max="9" value="3" required>
+          </label>
           <label class="checkbox-label">
-            <input id="cfg-use_roll" type="checkbox">
+            <input id="cfg-use_roll" type="checkbox" checked>
             Aktifkan Deteksi Roll (use_roll)
+          </label>
+          <label class="checkbox-label">
+            <input id="cfg-use_ml" type="checkbox" checked>
+            Aktifkan AI Random Forest (use_ml)
           </label>
           <div class="row" style="grid-column: 1 / -1; margin-top: 6px;">
             <button class="primary" id="apply-cfg-btn" type="submit" disabled>Terapkan Threshold Live</button>
@@ -476,15 +502,25 @@
 "use strict";
 
 const DEFAULT_CONFIG = {
-  overhead_enter_deg: 120.0,
-  overhead_exit_deg: 105.0,
-  face_down_deg: 145.0,
+  overhead_enter_deg: 110.0,
+  overhead_exit_deg: 95.0,
+  face_down_deg: 175.0,
   still_motion_max: 0.05,
-  still_gyro_max: 0.015,
-  use_roll: false,
+  still_gyro_max: 0.05,
+  lying_limit_sec: 10.0,
+  use_roll: true,
   roll_enter_deg: 60.0,
   roll_exit_deg: 45.0,
-  lying_limit_sec: 10.0,
+  flat_gate_deg: 20.0,
+  orientation_confirm_sec: 0.5,
+  landscape_overhead_enter_deg: 80.0,
+  landscape_overhead_exit_deg: 70.0,
+  landscape_lying_limit_sec: 15.0,
+  landscape_still_motion_max: 0.15,
+  landscape_still_gyro_max: 0.12,
+  use_ml: true,
+  ml_confidence_min: 0.55,
+  ml_smoothing_window: 3,
   max_window_dt_sec: 3.0,
   shake_motion_min: 2.0,
   shake_gyro_min: 1.6,
@@ -498,6 +534,80 @@ const DEFAULT_CONFIG = {
 };
 
 let activeConfig = { ...DEFAULT_CONFIG };
+let currentOrientation = "portrait";
+
+// Referensi silang: mengikuti logika shared/processing.py:lean_from_features
+// dan nodes/posture_service/rules.py:_update_orientation (flat-gate + histeresis roll).
+function leanFromFeatures(overheadDeg, rollDeg) {
+  const sinTilt = Math.sin((overheadDeg * Math.PI) / 180.0);
+  const sinRoll = Math.sin((rollDeg * Math.PI) / 180.0);
+  const nx = Math.max(-1.0, Math.min(1.0, sinRoll));
+  const cosRollSq = Math.max(0.0, 1.0 - nx * nx);
+  const sinSq = Math.max(0.0, sinTilt * sinTilt - nx * nx);
+  const ny = Math.sqrt(Math.min(sinSq, cosRollSq));
+  if (Math.hypot(nx, ny) < 1e-6) return null;
+  return (Math.atan2(nx, ny) * 180.0) / Math.PI;
+}
+
+// Referensi silang ke nodes/posture_service/rules.py:_update_orientation:
+// Menahan prevOrientation saat HP hampir datar (overheadDeg < flat_gate_deg atau > 180 - flat_gate_deg).
+function computePreviewOrientation(overheadDeg, rollDeg, prevOrientation, cfg) {
+  const prev = prevOrientation === "landscape" ? "landscape" : "portrait";
+  const c = cfg || activeConfig;
+  if (!c.use_roll) return "portrait";
+  const flatGate = typeof c.flat_gate_deg === "number" ? c.flat_gate_deg : 20.0;
+  if (overheadDeg < flatGate || overheadDeg > 180.0 - flatGate) {
+    return prev;
+  }
+  const lean = leanFromFeatures(overheadDeg, rollDeg);
+  if (lean === null) return prev;
+  const rollEnter = typeof c.roll_enter_deg === "number" ? c.roll_enter_deg : 60.0;
+  const rollExit = typeof c.roll_exit_deg === "number" ? c.roll_exit_deg : 45.0;
+  if (prev === "landscape") {
+    return lean < rollExit ? "portrait" : "landscape";
+  }
+  return lean >= rollEnter ? "landscape" : "portrait";
+}
+
+function renderOrientationBadge(orientation) {
+  const normalized = String(orientation || "portrait").toLowerCase() === "landscape" ? "landscape" : "portrait";
+  currentOrientation = normalized;
+  const label = normalized.toUpperCase();
+  const badge = $("orientation-badge");
+  if (badge) {
+    badge.textContent = label;
+    badge.className = normalized === "landscape" ? "warn" : "info";
+  }
+  const rowEl = $("edge1-orientation");
+  if (rowEl) {
+    rowEl.textContent = label;
+  }
+}
+
+function renderEngineAndAIPrediction(data) {
+  const mode = data.detection_mode === "ml" ? "ml" : "rule";
+  const pred = typeof data.ml_prediction === "string" ? data.ml_prediction : null;
+  const conf = typeof data.ml_confidence === "number" && isFinite(data.ml_confidence) ? data.ml_confidence : null;
+  const engineEl = $("engine-badge");
+  const edgeAiEl = $("edge1-ai");
+
+  if (mode === "ml" && pred && conf !== null) {
+    const pct = Math.round(conf * 100);
+    if (engineEl) {
+      setPill(engineEl, `AI · RF (${pct}%)`, "purple");
+    }
+    if (edgeAiEl) {
+      edgeAiEl.textContent = `${pred} (${pct}%)`;
+    }
+  } else {
+    if (engineEl) {
+      setPill(engineEl, "Rule-Based", "off");
+    }
+    if (edgeAiEl) {
+      edgeAiEl.textContent = "Rule-Based (Fallback)";
+    }
+  }
+}
 
 const MAX_POINTS = 60;
 const STATUS_CLASS = {
@@ -693,6 +803,11 @@ function renderStatus(data) {
   badge.textContent = status;
   badge.className = STATUS_CLASS[status] || "info";
 
+  if (data.orientation === "portrait" || data.orientation === "landscape") {
+    renderOrientationBadge(data.orientation);
+  }
+  renderEngineAndAIPrediction(data);
+
   const when = typeof data.at_ms === "number" ? ` (${clock(data.at_ms)})` : "";
   $("status-reason").textContent = String(data.reason || "") + when;
 
@@ -733,6 +848,14 @@ function updateEdge(id, data) {
   };
 
   if (id === "edge1") {
+    const previewOrientation = computePreviewOrientation(
+      overhead,
+      roll,
+      currentOrientation,
+      activeConfig
+    );
+    renderOrientationBadge(previewOrientation);
+
     $("edge1-overhead").textContent = `${fmt(overhead, 1)} °`;
     $("edge1-roll").textContent = `${fmt(roll, 1)} °`;
     $("edge1-motion").textContent = `${fmt(motion, 4)} m/s²`;
@@ -783,6 +906,8 @@ function applyReceivedConfig(cfg) {
     "alert_cooldown_sec",
     "edge_timeout_sec",
     "roll_enter_deg",
+    "ml_confidence_min",
+    "ml_smoothing_window",
   ];
   for (const key of numericFields) {
     const el = $(`cfg-${key}`);
@@ -791,13 +916,22 @@ function applyReceivedConfig(cfg) {
     }
   }
   $("cfg-use_roll").checked = Boolean(activeConfig.use_roll);
+  if ($("cfg-use_ml")) {
+    $("cfg-use_ml").checked = Boolean(activeConfig.use_ml);
+  }
   $("legend-enter").textContent = `${activeConfig.overhead_enter_deg}°`;
   $("legend-exit").textContent = `${activeConfig.overhead_exit_deg}°`;
+  if ($("legend-landscape-enter") && typeof activeConfig.landscape_overhead_enter_deg === "number") {
+    $("legend-landscape-enter").textContent = `${activeConfig.landscape_overhead_enter_deg}°`;
+  }
+  if ($("legend-landscape-exit") && typeof activeConfig.landscape_overhead_exit_deg === "number") {
+    $("legend-landscape-exit").textContent = `${activeConfig.landscape_overhead_exit_deg}°`;
+  }
   drawChart();
   appendLog(
     "CONFIG",
     "Sinkronisasi Config",
-    `enter=${activeConfig.overhead_enter_deg}°, exit=${activeConfig.overhead_exit_deg}°, limit=${activeConfig.lying_limit_sec}s, use_roll=${activeConfig.use_roll}`
+    `enter=${activeConfig.overhead_enter_deg}°, exit=${activeConfig.overhead_exit_deg}°, limit=${activeConfig.lying_limit_sec}s, use_roll=${activeConfig.use_roll}, use_ml=${activeConfig.use_ml}`
   );
 }
 
@@ -822,7 +956,10 @@ function submitConfigForm(event) {
     alert_cooldown_sec: Number($("cfg-alert_cooldown_sec").value),
     edge_timeout_sec: Number($("cfg-edge_timeout_sec").value),
     roll_enter_deg: Number($("cfg-roll_enter_deg").value),
+    ml_confidence_min: Number($("cfg-ml_confidence_min").value),
+    ml_smoothing_window: parseInt($("cfg-ml_smoothing_window").value, 10),
     use_roll: $("cfg-use_roll").checked,
+    use_ml: $("cfg-use_ml").checked,
   };
   sendControl("UPDATE_CONFIG", params);
   $("cfg-feedback").textContent = `UPDATE_CONFIG dikirim (${clock(Date.now())})`;
@@ -881,10 +1018,8 @@ function drawChart() {
   // Empat garis threshold: 2 portrait + 2 landscape
   const portraitEnter = activeConfig.overhead_enter_deg;
   const portraitExit = activeConfig.overhead_exit_deg;
-
-  // Threshold khusus landscape (ubah nilainya sesuai kebutuhan)
-  const landscapeEnter = 80;
-  const landscapeExit = 70;
+  const landscapeEnter = activeConfig.landscape_overhead_enter_deg || 80;
+  const landscapeExit = activeConfig.landscape_overhead_exit_deg || 70;
 
   ctx.setLineDash([6, 4]);
   ctx.lineWidth = 1.8;

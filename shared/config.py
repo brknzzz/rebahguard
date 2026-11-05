@@ -55,6 +55,11 @@ class DetectorConfig:
     landscape_still_motion_max: float = 0.15   # jempol main game = lebih banyak gerak
     landscape_still_gyro_max: float = 0.12
 
+    # --- Hybrid ML (Random Forest + Temporal Smoothing) ---
+    use_ml: bool = True
+    ml_confidence_min: float = 0.55
+    ml_smoothing_window: int = 3
+
     # --- Umum ---
     max_window_dt_sec: float = 3.0
     shake_motion_min: float = 2.0
@@ -73,12 +78,25 @@ class DetectorConfig:
     def _validate(self) -> None:
         if type(self.use_roll) is not bool:
             raise ValueError("use_roll must be a boolean")
+        if type(self.use_ml) is not bool:
+            raise ValueError("use_ml must be a boolean")
 
         int_fields = ("shake_confirm_windows", "stale_message_ms")
         for name in int_fields:
             val = getattr(self, name)
             if type(val) is not int or val <= 0:
                 raise ValueError(f"{name} must be a positive integer")
+
+        if type(self.ml_smoothing_window) is not int or not (1 <= self.ml_smoothing_window <= 9):
+            raise ValueError("ml_smoothing_window must be an integer between 1 and 9")
+
+        if (
+            type(self.ml_confidence_min) not in (int, float)
+            or not math.isfinite(self.ml_confidence_min)
+            or not (0.0 < float(self.ml_confidence_min) <= 1.0)
+        ):
+            raise ValueError("ml_confidence_min must be a finite float in (0.0, 1.0]")
+        object.__setattr__(self, "ml_confidence_min", float(self.ml_confidence_min))
 
         float_fields = (
             "overhead_enter_deg",
@@ -204,7 +222,7 @@ class DetectorConfig:
 
         merged = self.to_dict()
         for key, value in partial_dict.items():
-            if key in ("shake_confirm_windows", "stale_message_ms"):
+            if key in ("shake_confirm_windows", "stale_message_ms", "ml_smoothing_window"):
                 if type(value) is float and value.is_integer():
                     value = int(value)
             merged[key] = value

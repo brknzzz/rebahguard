@@ -8,4 +8,6 @@ __pycache__/
 venv/
 .DS_Store
 *.log
-README.md
+*.tmp
+data/*.tmp
+models/*.tmp

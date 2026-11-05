@@ -1,29 +1,13 @@
 """NODE 3: RebahGuard FSM & multisensor fusion rules (pure Python, no MQTT dependency)."""
 
+from collections import Counter, deque
 from dataclasses import dataclass
-import math
 import time
 from typing import Any
 
 from shared.config import DetectorConfig, LANDSCAPE, PORTRAIT
-from shared.messages import AlertMessage, ControlCommand, StatusMessage, Telemetry
-
-
-def lean_from_features(overhead_deg: float, roll_deg: float) -> float | None:
-    """Rekonstruksi in-plane lean (0=portrait, 90=landscape) dari telemetry.
-
-    roll_deg = atan2(|ax|, sqrt(ay^2+az^2)), overhead_deg = acos(az/g).
-    |ax| = g*sin(r), |az| = g*|cos(t)|  ->  |ay| = g*sqrt(cos^2 r - cos^2 t).
-    Return None kalau HP hampir datar (lean tidak valid).
-    """
-    r = math.radians(roll_deg)
-    t = math.radians(overhead_deg)
-    ay_sq = math.cos(r) ** 2 - math.cos(t) ** 2
-    ax = math.sin(r)
-    ay = math.sqrt(max(0.0, ay_sq))
-    if ax < 1e-6 and ay < 1e-6:
-        return None
-    return math.degrees(math.atan2(ax, ay))
+from shared.messages import AlertMessage, ControlCommand, StatusMessage, Telemetry, VALID_POSTURE_LABELS
+from shared.processing import lean_from_features, safe_lean_deg
 
 
 @dataclass(frozen=True)
@@ -35,8 +19,13 @@ class Decision:
 
 
 class RebahDetector:
-    def __init__(self, config: DetectorConfig | None = None) -> None:
+    def __init__(
+        self,
+        config: DetectorConfig | None = None,
+        ml_classifier: Any | None = None,
+    ) -> None:
         self.config: DetectorConfig = config if config is not None else DetectorConfig()
+        self.ml_classifier: Any | None = ml_classifier
         self.armed: bool = True
         self.status: str = "WAITING"
         self.reason: str = "Menunggu telemetry dari Edge 1"
@@ -50,6 +39,12 @@ class RebahDetector:
         self.nagging_active: bool = False
         self.alert_active: bool = False
 
+        self.detection_mode: str = "rule"
+        self.ml_prediction: str | None = None
+        self.ml_confidence: float | None = None
+        self._ml_buffer: deque[str] = deque()
+        self._effective_posture: str = "POSISI_DUDUK_SEHAT"
+
         self.snooze_until_ms: int = 0
         self.prev_edge1_sent_ms: int | None = None
         self.last_edge1_ms: int | None = None
@@ -62,6 +57,12 @@ class RebahDetector:
 
         self.latest: dict[str, Telemetry] = {}
         self.last_seq: dict[tuple[str, str], int] = {}
+
+    def _reset_ml_state(self) -> None:
+        self._ml_buffer.clear()
+        self.detection_mode = "rule"
+        self.ml_prediction = None
+        self.ml_confidence = None
 
     def _clear_active_alerts(self, reason: str, current_ms: int) -> AlertMessage | None:
         was_active = self.nagging_active or self.alert_active or self.status in ("ALERT_MATA", "TEGURAN_ORTU")
@@ -86,6 +87,8 @@ class RebahDetector:
             self.lying_elapsed_sec = 0.0
             self.in_lying_zone = False
             self.shake_streak = 0
+            self._reset_ml_state()
+            self._effective_posture = "POSISI_DUDUK_SEHAT"
             clear_msg = self._clear_active_alerts("Sistem dinonaktifkan (DISARMED)", current_ms)
             self.status = "DISARMED"
             self.reason = "Monitoring dinonaktifkan oleh orang tua"
@@ -101,6 +104,8 @@ class RebahDetector:
         self.lying_elapsed_sec = 0.0
         self.in_lying_zone = False
         self.shake_streak = 0
+        self._reset_ml_state()
+        self._effective_posture = "POSISI_DUDUK_SEHAT"
         clear_msg = self._clear_active_alerts("Snooze diaktifkan sementara", current_ms)
         self.status = "SNOOZED"
         self.reason = f"Snooze aktif selama {self.config.snooze_duration_sec:.0f} detik"
@@ -112,6 +117,8 @@ class RebahDetector:
         self.in_lying_zone = False
         self.snooze_until_ms = 0
         self.shake_streak = 0
+        self._reset_ml_state()
+        self._effective_posture = "POSISI_DUDUK_SEHAT"
         clear_msg = self._clear_active_alerts("State di-reset ke posisi sehat", current_ms)
         self.status = "POSISI_DUDUK_SEHAT"
         self.reason = "State di-reset oleh pengguna"
@@ -136,6 +143,11 @@ class RebahDetector:
 
     def update_config(self, partial_dict: dict[str, Any]) -> DetectorConfig:
         self.config = self.config.merged_with(partial_dict)
+        if not self.config.use_ml:
+            self._reset_ml_state()
+        else:
+            while len(self._ml_buffer) > self.config.ml_smoothing_window:
+                self._ml_buffer.popleft()
         return self.config
 
     def apply_command(self, cmd: ControlCommand | str | bytes, now_ms: int | None = None) -> Decision:
@@ -190,7 +202,7 @@ class RebahDetector:
             return self.orientation
         tilt = data.overhead_deg
         if tilt < cfg.flat_gate_deg or tilt > 180.0 - cfg.flat_gate_deg:
-            return self.orientation  # hampir datar: lean tidak valid, tahan
+            return self.orientation  # hampir datar: lean tidak valid, tahan orientasi terakhir
         lean = lean_from_features(tilt, data.roll_deg)
         if lean is None:
             return self.orientation
@@ -209,6 +221,21 @@ class RebahDetector:
             self._pending_orientation = None
         return self.orientation
 
+    def _majority_vote_posture(self, raw_label: str) -> str:
+        self._ml_buffer.append(raw_label)
+        while len(self._ml_buffer) > self.config.ml_smoothing_window:
+            self._ml_buffer.popleft()
+
+        counts = Counter(self._ml_buffer)
+        max_votes = max(counts.values())
+        winners = [lbl for lbl, cnt in counts.items() if cnt == max_votes]
+        if len(winners) == 1:
+            return winners[0]
+        # Jika seri (misal 3 kelas berbeda di window=3), pertahankan postur efektif sebelumnya
+        if self.in_lying_zone:
+            return "REBAHAN_AKTIF"
+        return self._effective_posture
+
     def _accept_edge2(self, data: Telemetry, current_ms: int) -> Decision:
         self.last_edge2_ms = current_ms
 
@@ -216,6 +243,7 @@ class RebahDetector:
             self.shake_streak = 0
             self.lying_elapsed_sec = 0.0
             self.in_lying_zone = False
+            self._reset_ml_state()
             clear_msg = self._clear_active_alerts("Sistem dinonaktifkan (DISARMED)", current_ms)
             self.status = "DISARMED"
             self.reason = "Monitoring dinonaktifkan oleh orang tua"
@@ -225,6 +253,7 @@ class RebahDetector:
             self.shake_streak = 0
             self.lying_elapsed_sec = 0.0
             self.in_lying_zone = False
+            self._reset_ml_state()
             clear_msg = self._clear_active_alerts("Snooze sedang aktif", current_ms)
             self.status = "SNOOZED"
             self.reason = "Monitoring ditunda sementara (SNOOZED)"
@@ -271,6 +300,8 @@ class RebahDetector:
         if not self.armed:
             self.lying_elapsed_sec = 0.0
             self.in_lying_zone = False
+            self._reset_ml_state()
+            self._effective_posture = "POSISI_DUDUK_SEHAT"
             clear_msg = self._clear_active_alerts("Sistem dinonaktifkan (DISARMED)", current_ms)
             self.status = "DISARMED"
             self.reason = "Monitoring dinonaktifkan oleh orang tua"
@@ -279,16 +310,19 @@ class RebahDetector:
         if current_ms < self.snooze_until_ms:
             self.lying_elapsed_sec = 0.0
             self.in_lying_zone = False
+            self._reset_ml_state()
+            self._effective_posture = "POSISI_DUDUK_SEHAT"
             clear_msg = self._clear_active_alerts("Snooze sedang aktif", current_ms)
             self.status = "SNOOZED"
             self.reason = "Monitoring ditunda sementara (SNOOZED)"
             return Decision(self.status, self.reason, parent_alert=None, child_alert=clear_msg)
 
-        # Klasifikasi postur Edge 1: orientasi (portrait/landscape) -> threshold per orientasi
+        # 1) Klasifikasi orientasi (portrait/landscape) -> threshold per orientasi
         orientation = self._update_orientation(data, current_ms)
         th = self.config.thresholds_for(orientation)
         self.active_limit_sec = th.lying_limit_sec
 
+        # 2) HARD-VETO MEJA (Selalu Menang atas ML)
         is_face_down_table = (
             data.overhead_deg >= self.config.face_down_deg
             and data.motion_rms <= th.still_motion_max
@@ -296,6 +330,8 @@ class RebahDetector:
         )
 
         if is_face_down_table:
+            self._reset_ml_state()
+            self._effective_posture = "DITARUH_TELUNGKUP"
             self.in_lying_zone = False
             self.lying_elapsed_sec = 0.0
             clear_msg = self._clear_active_alerts("HP ditaruh telungkup di meja", current_ms)
@@ -303,18 +339,61 @@ class RebahDetector:
             self.reason = "HP ditaruh telungkup diam di permukaan meja"
             return Decision(self.status, self.reason, parent_alert=None, child_alert=clear_msg)
 
-        # Histeresis sudut: roll TIDAK lagi memicu rebahan sendiri, hanya memilih threshold.
-        if self.in_lying_zone:
-            self.in_lying_zone = data.overhead_deg > th.exit_deg
-        else:
-            self.in_lying_zone = data.overhead_deg >= th.enter_deg
+        # 3) Inferensi ML + Temporal Smoothing (dengan Fallback ke Rule-Based)
+        ml_used = False
+        if self.config.use_ml and self.ml_classifier is not None:
+            ml_result = self.ml_classifier.predict(
+                data.overhead_deg,
+                data.roll_deg,
+                data.motion_rms,
+                data.gyro_rms,
+            )
+            if ml_result is not None:
+                raw_label, conf = ml_result
+                if raw_label in VALID_POSTURE_LABELS and conf >= self.config.ml_confidence_min:
+                    ml_used = True
+                    smoothed_label = self._majority_vote_posture(raw_label)
+                    self.detection_mode = "ml"
+                    self.ml_prediction = smoothed_label
+                    self.ml_confidence = round(float(conf), 4)
+                    self._effective_posture = smoothed_label
 
-        if not self.in_lying_zone:
-            self.lying_elapsed_sec = 0.0
-            clear_msg = self._clear_active_alerts("Anak kembali ke posisi duduk sehat", current_ms)
-            self.status = "POSISI_DUDUK_SEHAT"
-            self.reason = "Posisi penggunaan HP sehat (duduk/berdiri)"
-            return Decision(self.status, self.reason, parent_alert=None, child_alert=clear_msg)
+                    if smoothed_label == "DITARUH_TELUNGKUP":
+                        self.in_lying_zone = False
+                        self.lying_elapsed_sec = 0.0
+                        clear_msg = self._clear_active_alerts("HP ditaruh di meja (ML)", current_ms)
+                        self.status = "DITARUH_TELUNGKUP"
+                        self.reason = f"HP ditaruh diam di permukaan meja (AI RF {conf:.0%})"
+                        return Decision(self.status, self.reason, parent_alert=None, child_alert=clear_msg)
+
+                    if smoothed_label == "POSISI_DUDUK_SEHAT":
+                        self.in_lying_zone = False
+                        self.lying_elapsed_sec = 0.0
+                        clear_msg = self._clear_active_alerts("Anak kembali ke posisi duduk sehat", current_ms)
+                        self.status = "POSISI_DUDUK_SEHAT"
+                        self.reason = f"Posisi penggunaan HP sehat (AI RF {conf:.0%})"
+                        return Decision(self.status, self.reason, parent_alert=None, child_alert=clear_msg)
+
+                    # smoothed_label == "REBAHAN_AKTIF"
+                    self.in_lying_zone = True
+
+        # 4) Fallback Rule-Based jika ML nonaktif / model belum ada / confidence rendah
+        if not ml_used:
+            self._reset_ml_state()
+            if self.in_lying_zone:
+                self.in_lying_zone = data.overhead_deg > th.exit_deg
+            else:
+                self.in_lying_zone = data.overhead_deg >= th.enter_deg
+
+            if not self.in_lying_zone:
+                self._effective_posture = "POSISI_DUDUK_SEHAT"
+                self.lying_elapsed_sec = 0.0
+                clear_msg = self._clear_active_alerts("Anak kembali ke posisi duduk sehat", current_ms)
+                self.status = "POSISI_DUDUK_SEHAT"
+                self.reason = "Posisi penggunaan HP sehat (duduk/berdiri)"
+                return Decision(self.status, self.reason, parent_alert=None, child_alert=clear_msg)
+
+            self._effective_posture = "REBAHAN_AKTIF"
 
         # in_lying_zone == True: akumulasi durasi rebahan dengan batas max_window_dt_sec
         if prev_sent_ms is not None:
@@ -406,5 +485,8 @@ class RebahDetector:
             at_ms=current_ms,
             device_id=reading.device_id if reading else None,
             sequence=reading.sequence if reading else None,
+            orientation=self.orientation,
+            detection_mode=self.detection_mode,
+            ml_prediction=self.ml_prediction,
+            ml_confidence=self.ml_confidence,
         )
-
