@@ -4,6 +4,7 @@ import re
 import unittest
 from unittest import mock
 
+from nodes.posture_service.main import build_offline_lwt_json
 from scripts.offline_demo import main as run_offline_demo
 from scripts.send_control import build_control_from_args
 from shared import alarm
@@ -14,6 +15,11 @@ from shared.sensors import SIMULATOR_SCENARIOS, Simulator, parse_termux_sensor_s
 
 class MessageSchemaTests(unittest.TestCase):
     def test_status_message_roundtrip_and_fields(self):
+        probs = {
+            "POSISI_DUDUK_SEHAT": 0.05,
+            "DITARUH_TELUNGKUP": 0.025,
+            "REBAHAN_AKTIF": 0.925,
+        }
         msg = StatusMessage(
             status="ALERT_MATA",
             reason="Rebahan terlalu lama",
@@ -30,6 +36,8 @@ class MessageSchemaTests(unittest.TestCase):
             detection_mode="ml",
             ml_prediction="REBAHAN_AKTIF",
             ml_confidence=0.925,
+            ml_probabilities=probs,
+            ml_probabilities_source="ml",
         )
         raw = msg.to_json()
         parsed = StatusMessage.from_json(raw)
@@ -53,6 +61,8 @@ class MessageSchemaTests(unittest.TestCase):
                 "detection_mode": "ml",
                 "ml_prediction": "REBAHAN_AKTIF",
                 "ml_confidence": 0.925,
+                "ml_probabilities": probs,
+                "ml_probabilities_source": "ml",
             },
         )
 
@@ -77,6 +87,14 @@ class MessageSchemaTests(unittest.TestCase):
         self.assertEqual(parsed.detection_mode, "rule")
         self.assertIsNone(parsed.ml_prediction)
         self.assertIsNone(parsed.ml_confidence)
+        self.assertIsNone(parsed.ml_probabilities)
+        self.assertIsNone(parsed.ml_probabilities_source)
+
+        # Pastikan LWT OFFLINE memiliki ml_probabilities is None & ml_probabilities_source is None
+        lwt = StatusMessage.from_json(build_offline_lwt_json(10.0, now_ms=123456))
+        self.assertEqual(lwt.status, "OFFLINE")
+        self.assertIsNone(lwt.ml_probabilities)
+        self.assertIsNone(lwt.ml_probabilities_source)
 
         # Tolak orientasi tidak valid
         with self.assertRaises(ValueError):
@@ -138,6 +156,104 @@ class MessageSchemaTests(unittest.TestCase):
                 at_ms=123456,
                 detection_mode="ml",
                 ml_prediction="TIDUR_MIRING",
+            )
+
+        valid_probs = {
+            "POSISI_DUDUK_SEHAT": 0.7,
+            "DITARUH_TELUNGKUP": 0.1,
+            "REBAHAN_AKTIF": 0.2,
+        }
+
+        # Tolak jika hanya salah satu dari ml_probabilities atau ml_probabilities_source yang None
+        with self.assertRaises(ValueError):
+            StatusMessage(
+                status="POSISI_DUDUK_SEHAT",
+                reason="Missing source",
+                armed=True,
+                nagging_active=False,
+                lying_elapsed_sec=0.0,
+                lying_limit_sec=10.0,
+                edge1_online=True,
+                edge2_online=False,
+                at_ms=123456,
+                ml_probabilities=valid_probs,
+                ml_probabilities_source=None,
+            )
+        with self.assertRaises(ValueError):
+            StatusMessage(
+                status="POSISI_DUDUK_SEHAT",
+                reason="Missing probs",
+                armed=True,
+                nagging_active=False,
+                lying_elapsed_sec=0.0,
+                lying_limit_sec=10.0,
+                edge1_online=True,
+                edge2_online=False,
+                at_ms=123456,
+                ml_probabilities=None,
+                ml_probabilities_source="ml",
+            )
+
+        # Tolak key asing atau key kurang pada ml_probabilities
+        for bad_probs in (
+            {"POSISI_DUDUK_SEHAT": 0.8, "REBAHAN_AKTIF": 0.2},
+            {
+                "POSISI_DUDUK_SEHAT": 0.5,
+                "DITARUH_TELUNGKUP": 0.2,
+                "REBAHAN_AKTIF": 0.2,
+                "TIDUR_MIRING": 0.1,
+            },
+        ):
+            with self.assertRaises(ValueError):
+                StatusMessage(
+                    status="POSISI_DUDUK_SEHAT",
+                    reason="Bad keys",
+                    armed=True,
+                    nagging_active=False,
+                    lying_elapsed_sec=0.0,
+                    lying_limit_sec=10.0,
+                    edge1_online=True,
+                    edge2_online=False,
+                    at_ms=123456,
+                    ml_probabilities=bad_probs,
+                    ml_probabilities_source="ml",
+                )
+
+        # Tolak nilai ml_probabilities < 0, > 1, atau NaN
+        for bad_val in (-0.01, 1.05, float("nan")):
+            with self.assertRaises(ValueError):
+                StatusMessage(
+                    status="POSISI_DUDUK_SEHAT",
+                    reason="Bad prob value",
+                    armed=True,
+                    nagging_active=False,
+                    lying_elapsed_sec=0.0,
+                    lying_limit_sec=10.0,
+                    edge1_online=True,
+                    edge2_online=False,
+                    at_ms=123456,
+                    ml_probabilities={
+                        "POSISI_DUDUK_SEHAT": bad_val,
+                        "DITARUH_TELUNGKUP": 0.1,
+                        "REBAHAN_AKTIF": 0.2,
+                    },
+                    ml_probabilities_source="ml",
+                )
+
+        # Tolak ml_probabilities_source tidak valid
+        with self.assertRaises(ValueError):
+            StatusMessage(
+                status="POSISI_DUDUK_SEHAT",
+                reason="Bad prob source",
+                armed=True,
+                nagging_active=False,
+                lying_elapsed_sec=0.0,
+                lying_limit_sec=10.0,
+                edge1_online=True,
+                edge2_online=False,
+                at_ms=123456,
+                ml_probabilities=valid_probs,
+                ml_probabilities_source="random_guess",
             )
 
     def test_alert_message_roundtrip(self):

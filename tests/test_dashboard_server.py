@@ -32,6 +32,12 @@ class DashboardServerTests(TestCase):
                     body = result.read()
                     self.assertIn(b"RebahGuard Dashboard", body)
                     self.assertIn(b"Mode Kalibrasi", body)
+                    self.assertIn(b'id="ai-monitor-panel"', body)
+                    self.assertIn(b'id="h-ai-monitor"', body)
+                    self.assertIn(b'id="hud-prob-list"', body)
+                    self.assertIn(b"ALLOWED_POSTURE_LABELS", body)
+                    self.assertIn(b"prefers-reduced-motion", body)
+                    self.assertNotIn(b"innerHTML", body)
                 with urlopen(url + "/config.json") as result:
                     self.assertEqual(result.status, 200)
                     config = json.loads(result.read())

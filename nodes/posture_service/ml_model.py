@@ -59,13 +59,14 @@ class PostureMLClassifier:
             self._model = None
             self._loaded_mtime = None
 
-    def predict(
+    def predict_with_proba(
         self,
         overhead_deg: float,
         roll_deg: float,
         motion_rms: float,
         gyro_rms: float,
-    ) -> tuple[str, float] | None:
+    ) -> tuple[str, float, dict[str, float]] | None:
+        """Inferensi tunggal: memanggil clf.predict_proba() tepat 1 kali per window."""
         self._maybe_reload()
         if self._model is None:
             return None
@@ -76,18 +77,52 @@ class PostureMLClassifier:
             dtype=float,
         )
         try:
-            probs = self._model.predict_proba(features)[0]
-            classes = list(self._model.classes_)
-            best_idx = int(np.argmax(probs))
-            predicted_label = str(classes[best_idx])
-            max_proba = float(probs[best_idx])
+            row_proba = self._model.predict_proba(features)[0]
+            classes = [str(c) for c in self._model.classes_]
         except Exception:
             return None
 
-        if predicted_label not in VALID_POSTURE_LABELS:
-            return None
-        if not math.isfinite(max_proba):
-            return None
-        max_proba = max(0.0, min(1.0, max_proba))
-        return predicted_label, max_proba
+        raw_map: dict[str, float] = {}
+        for label, prob in zip(classes, row_proba):
+            fprob = float(prob)
+            if not math.isfinite(fprob):
+                return None
+            raw_map[str(label)] = round(max(0.0, min(1.0, fprob)), 4)
 
+        if not set(raw_map.keys()).issubset(set(VALID_POSTURE_LABELS)):
+            return None
+
+        probs_dict: dict[str, float] = {
+            label: raw_map.get(label, 0.0) for label in VALID_POSTURE_LABELS
+        }
+        best_label = max(probs_dict, key=probs_dict.get)
+        best_conf = probs_dict[best_label]
+        if best_label not in VALID_POSTURE_LABELS:
+            return None
+        return best_label, best_conf, probs_dict
+
+    def predict(
+        self,
+        overhead_deg: float,
+        roll_deg: float,
+        motion_rms: float,
+        gyro_rms: float,
+    ) -> tuple[str, float] | None:
+        res = self.predict_with_proba(overhead_deg, roll_deg, motion_rms, gyro_rms)
+        if res is None:
+            return None
+        best_label, best_conf, _ = res
+        return best_label, best_conf
+
+    def predict_proba(
+        self,
+        overhead_deg: float,
+        roll_deg: float,
+        motion_rms: float,
+        gyro_rms: float,
+    ) -> dict[str, float] | None:
+        res = self.predict_with_proba(overhead_deg, roll_deg, motion_rms, gyro_rms)
+        if res is None:
+            return None
+        _, _, probs_dict = res
+        return probs_dict

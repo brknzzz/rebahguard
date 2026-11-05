@@ -33,6 +33,8 @@ def build_offline_lwt_json(lying_limit_sec: float = 10.0, now_ms: int | None = N
         at_ms=current_ms,
         orientation="portrait",
         detection_mode="rule",
+        ml_probabilities=None,
+        ml_probabilities_source=None,
     ).to_json()
 
 

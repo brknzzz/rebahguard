@@ -12,6 +12,7 @@ VALID_DEVICES = ("edge1", "edge2")
 VALID_ORIENTATIONS = (PORTRAIT, LANDSCAPE)
 VALID_DETECTION_MODES = ("rule", "ml")
 VALID_POSTURE_LABELS = ("POSISI_DUDUK_SEHAT", "DITARUH_TELUNGKUP", "REBAHAN_AKTIF")
+VALID_PROBA_SOURCES = ("ml", "heuristic", "veto")
 VALID_ALERT_TARGETS = ("parent", "child")
 VALID_ALERT_EVENTS = ("ALERT_MATA", "TEGURAN_ORTU", "CLEAR")
 VALID_COMMANDS = ("ARM", "DISARM", "SCOLD", "SNOOZE", "RESET", "UPDATE_CONFIG")
@@ -172,6 +173,8 @@ class StatusMessage:
     detection_mode: str = "rule"
     ml_prediction: str | None = None
     ml_confidence: float | None = None
+    ml_probabilities: dict[str, float] | None = None
+    ml_probabilities_source: str | None = None
 
     def __post_init__(self) -> None:
         _require_non_empty_str(self.status, "status")
@@ -210,6 +213,28 @@ class StatusMessage:
                 _require_finite_float(self.ml_confidence, "ml_confidence", 0.0, 1.0),
             )
 
+        if (self.ml_probabilities is None) != (self.ml_probabilities_source is None):
+            raise ValueError(
+                "ml_probabilities and ml_probabilities_source must both be None or both be provided"
+            )
+
+        if self.ml_probabilities is not None:
+            if not isinstance(self.ml_probabilities, dict):
+                raise ValueError("ml_probabilities must be a dict")
+            if set(self.ml_probabilities.keys()) != set(VALID_POSTURE_LABELS):
+                raise ValueError(
+                    f"ml_probabilities keys must be exactly {VALID_POSTURE_LABELS}"
+                )
+            cleaned_probs: dict[str, float] = {}
+            for k, v in self.ml_probabilities.items():
+                cleaned_probs[k] = _require_finite_float(v, f"ml_probabilities[{k}]", 0.0, 1.0)
+            object.__setattr__(self, "ml_probabilities", cleaned_probs)
+
+        if self.ml_probabilities_source is not None:
+            _require_non_empty_str(self.ml_probabilities_source, "ml_probabilities_source")
+            if self.ml_probabilities_source not in VALID_PROBA_SOURCES:
+                raise ValueError(f"Invalid ml_probabilities_source: {self.ml_probabilities_source}")
+
     def to_json(self) -> str:
         return json.dumps(asdict(self), allow_nan=False)
 
@@ -237,6 +262,8 @@ class StatusMessage:
             detection_mode=value.get("detection_mode") or "rule",
             ml_prediction=value.get("ml_prediction"),
             ml_confidence=value.get("ml_confidence"),
+            ml_probabilities=value.get("ml_probabilities"),
+            ml_probabilities_source=value.get("ml_probabilities_source"),
         )
 
 

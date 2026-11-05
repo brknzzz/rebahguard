@@ -2,10 +2,11 @@
 
 from collections import Counter, deque
 from dataclasses import dataclass
+import math
 import time
 from typing import Any
 
-from shared.config import DetectorConfig, LANDSCAPE, PORTRAIT
+from shared.config import DetectorConfig, LANDSCAPE, OrientationThresholds, PORTRAIT
 from shared.messages import AlertMessage, ControlCommand, StatusMessage, Telemetry, VALID_POSTURE_LABELS
 from shared.processing import lean_from_features, safe_lean_deg
 
@@ -42,7 +43,10 @@ class RebahDetector:
         self.detection_mode: str = "rule"
         self.ml_prediction: str | None = None
         self.ml_confidence: float | None = None
+        self.ml_probabilities: dict[str, float] | None = None
+        self.ml_probabilities_source: str | None = None
         self._ml_buffer: deque[str] = deque()
+        self._prob_window: deque[dict[str, float]] = deque()
         self._effective_posture: str = "POSISI_DUDUK_SEHAT"
 
         self.snooze_until_ms: int = 0
@@ -60,9 +64,12 @@ class RebahDetector:
 
     def _reset_ml_state(self) -> None:
         self._ml_buffer.clear()
+        self._prob_window.clear()
         self.detection_mode = "rule"
         self.ml_prediction = None
         self.ml_confidence = None
+        self.ml_probabilities = None
+        self.ml_probabilities_source = None
 
     def _clear_active_alerts(self, reason: str, current_ms: int) -> AlertMessage | None:
         was_active = self.nagging_active or self.alert_active or self.status in ("ALERT_MATA", "TEGURAN_ORTU")
@@ -94,6 +101,7 @@ class RebahDetector:
             self.reason = "Monitoring dinonaktifkan oleh orang tua"
             return Decision(self.status, self.reason, parent_alert=None, child_alert=clear_msg)
 
+        self._reset_ml_state()
         self.status = "POSISI_DUDUK_SEHAT" if "edge1" in self.latest else "WAITING"
         self.reason = "Monitoring diaktifkan (ARMED)"
         return Decision(self.status, self.reason)
@@ -144,10 +152,16 @@ class RebahDetector:
     def update_config(self, partial_dict: dict[str, Any]) -> DetectorConfig:
         self.config = self.config.merged_with(partial_dict)
         if not self.config.use_ml:
-            self._reset_ml_state()
+            self._ml_buffer.clear()
+            self._prob_window.clear()
+            self.detection_mode = "rule"
+            self.ml_prediction = None
+            self.ml_confidence = None
         else:
             while len(self._ml_buffer) > self.config.ml_smoothing_window:
                 self._ml_buffer.popleft()
+            while len(self._prob_window) > self.config.ml_smoothing_window:
+                self._prob_window.popleft()
         return self.config
 
     def apply_command(self, cmd: ControlCommand | str | bytes, now_ms: int | None = None) -> Decision:
@@ -184,11 +198,13 @@ class RebahDetector:
     def check_timeouts(self, now_ms: int | None = None) -> Decision:
         current_ms = now_ms if now_ms is not None else int(time.time() * 1000)
         if not self.armed:
+            self._reset_ml_state()
             self.status = "DISARMED"
             self.reason = "Monitoring dinonaktifkan oleh orang tua"
             return Decision(self.status, self.reason)
 
         if self.last_edge1_ms is None or (current_ms - self.last_edge1_ms) > self.config.edge_timeout_sec * 1000:
+            self._reset_ml_state()
             self.status = "EDGE_OFFLINE"
             self.reason = "Telemetry Edge 1 terputus atau belum diterima"
             return Decision(self.status, self.reason)
@@ -235,6 +251,93 @@ class RebahDetector:
         if self.in_lying_zone:
             return "REBAHAN_AKTIF"
         return self._effective_posture
+
+    def _smooth_ml_probabilities(self, probs: dict[str, float]) -> dict[str, float]:
+        cleaned = {k: round(max(0.0, min(1.0, float(probs.get(k, 0.0)))), 4) for k in VALID_POSTURE_LABELS}
+        self._prob_window.append(cleaned)
+        while len(self._prob_window) > self.config.ml_smoothing_window:
+            self._prob_window.popleft()
+        n = len(self._prob_window)
+        return {
+            k: round(sum(p[k] for p in self._prob_window) / n, 4)
+            for k in VALID_POSTURE_LABELS
+        }
+
+    def _compute_heuristic_probabilities(
+        self,
+        data: Telemetry,
+        th: OrientationThresholds,
+    ) -> dict[str, float]:
+        tilt = float(data.overhead_deg)
+        mid_deg = 0.5 * (th.exit_deg + th.enter_deg)
+        span_deg = max(5.0, th.enter_deg - th.exit_deg)
+
+        w_duduk = 1.0 / (1.0 + math.exp((tilt - mid_deg) / (span_deg * 0.5)))
+
+        still_factor = (
+            1.0
+            if (data.motion_rms <= th.still_motion_max * 2.0 and data.gyro_rms <= th.still_gyro_max * 2.0)
+            else 0.25
+        )
+        w_telungkup = still_factor / (1.0 + math.exp((self.config.face_down_deg - 5.0 - tilt) / 6.0))
+        w_rebahan = (1.0 - w_duduk) * (1.0 - 0.7 * w_telungkup)
+
+        total = max(1e-9, w_duduk + w_rebahan + w_telungkup)
+        p_duduk = round(w_duduk / total, 4)
+        p_telungkup = round(w_telungkup / total, 4)
+        p_rebahan = round(max(0.0, 1.0 - p_duduk - p_telungkup), 4)
+        return {
+            "POSISI_DUDUK_SEHAT": p_duduk,
+            "DITARUH_TELUNGKUP": p_telungkup,
+            "REBAHAN_AKTIF": p_rebahan,
+        }
+
+    def _run_single_ml_inference(
+        self,
+        data: Telemetry,
+    ) -> tuple[str, float, dict[str, float]] | None:
+        if self.ml_classifier is None:
+            return None
+
+        if hasattr(self.ml_classifier, "predict_with_proba"):
+            res = self.ml_classifier.predict_with_proba(
+                data.overhead_deg,
+                data.roll_deg,
+                data.motion_rms,
+                data.gyro_rms,
+            )
+            if (
+                isinstance(res, tuple)
+                and len(res) == 3
+                and isinstance(res[0], str)
+                and isinstance(res[2], dict)
+            ):
+                raw_label, conf, probs = res
+                if raw_label in VALID_POSTURE_LABELS and set(probs.keys()) == set(VALID_POSTURE_LABELS):
+                    return raw_label, float(conf), probs
+                return None
+
+        if hasattr(self.ml_classifier, "predict"):
+            pred = self.ml_classifier.predict(
+                data.overhead_deg,
+                data.roll_deg,
+                data.motion_rms,
+                data.gyro_rms,
+            )
+            if pred is not None and len(pred) == 2:
+                raw_label, conf = pred
+                if raw_label in VALID_POSTURE_LABELS and math.isfinite(float(conf)):
+                    conf_f = round(max(0.0, min(1.0, float(conf))), 4)
+                    other = round((1.0 - conf_f) / 2.0, 4)
+                    rem = round(max(0.0, 1.0 - conf_f - other), 4)
+                    others = [lbl for lbl in VALID_POSTURE_LABELS if lbl != raw_label]
+                    probs = {
+                        raw_label: conf_f,
+                        others[0]: other,
+                        others[1]: rem,
+                    }
+                    return raw_label, conf_f, probs
+        return None
 
     def _accept_edge2(self, data: Telemetry, current_ms: int) -> Decision:
         self.last_edge2_ms = current_ms
@@ -322,7 +425,7 @@ class RebahDetector:
         th = self.config.thresholds_for(orientation)
         self.active_limit_sec = th.lying_limit_sec
 
-        # 2) HARD-VETO MEJA (Selalu Menang atas ML)
+        # 2) Kasus A — HARD-VETO MEJA (Selalu Menang atas ML)
         is_face_down_table = (
             data.overhead_deg >= self.config.face_down_deg
             and data.motion_rms <= th.still_motion_max
@@ -331,6 +434,12 @@ class RebahDetector:
 
         if is_face_down_table:
             self._reset_ml_state()
+            self.ml_probabilities = {
+                "DITARUH_TELUNGKUP": 1.0,
+                "POSISI_DUDUK_SEHAT": 0.0,
+                "REBAHAN_AKTIF": 0.0,
+            }
+            self.ml_probabilities_source = "veto"
             self._effective_posture = "DITARUH_TELUNGKUP"
             self.in_lying_zone = False
             self.lying_elapsed_sec = 0.0
@@ -339,23 +448,21 @@ class RebahDetector:
             self.reason = "HP ditaruh telungkup diam di permukaan meja"
             return Decision(self.status, self.reason, parent_alert=None, child_alert=clear_msg)
 
-        # 3) Inferensi ML + Temporal Smoothing (dengan Fallback ke Rule-Based)
+        # 3) Kasus B — Inferensi ML Tunggal + Temporal Smoothing (dengan Fallback ke Rule-Based)
         ml_used = False
         if self.config.use_ml and self.ml_classifier is not None:
-            ml_result = self.ml_classifier.predict(
-                data.overhead_deg,
-                data.roll_deg,
-                data.motion_rms,
-                data.gyro_rms,
-            )
+            ml_result = self._run_single_ml_inference(data)
             if ml_result is not None:
-                raw_label, conf = ml_result
+                raw_label, conf, probs = ml_result
                 if raw_label in VALID_POSTURE_LABELS and conf >= self.config.ml_confidence_min:
                     ml_used = True
                     smoothed_label = self._majority_vote_posture(raw_label)
+                    avg_probs = self._smooth_ml_probabilities(probs)
                     self.detection_mode = "ml"
                     self.ml_prediction = smoothed_label
                     self.ml_confidence = round(float(conf), 4)
+                    self.ml_probabilities = avg_probs
+                    self.ml_probabilities_source = "ml"
                     self._effective_posture = smoothed_label
 
                     if smoothed_label == "DITARUH_TELUNGKUP":
@@ -377,9 +484,11 @@ class RebahDetector:
                     # smoothed_label == "REBAHAN_AKTIF"
                     self.in_lying_zone = True
 
-        # 4) Fallback Rule-Based jika ML nonaktif / model belum ada / confidence rendah
+        # 4) Kasus C — Fallback Rule-Based jika ML nonaktif / model belum ada / confidence rendah
         if not ml_used:
             self._reset_ml_state()
+            self.ml_probabilities = self._compute_heuristic_probabilities(data, th)
+            self.ml_probabilities_source = "heuristic"
             if self.in_lying_zone:
                 self.in_lying_zone = data.overhead_deg > th.exit_deg
             else:
@@ -489,4 +598,6 @@ class RebahDetector:
             detection_mode=self.detection_mode,
             ml_prediction=self.ml_prediction,
             ml_confidence=self.ml_confidence,
+            ml_probabilities=self.ml_probabilities,
+            ml_probabilities_source=self.ml_probabilities_source,
         )

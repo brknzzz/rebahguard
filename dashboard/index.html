@@ -252,6 +252,166 @@
     border-radius: 10px;
     padding: 12px 14px;
   }
+
+  /* DARK TELEMETRY HUD (.hud-monitor) */
+  .hud-monitor {
+    background: #090c0b;
+    color: #e5ece9;
+    border: 1px solid #24302c;
+    border-radius: 14px;
+    padding: 20px;
+    font-family: 'JetBrains Mono', ui-monospace, 'SFMono-Regular', Menlo, Consolas, monospace;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    box-shadow: 0 4px 18px rgba(0, 0, 0, 0.28);
+  }
+  .hud-monitor.is-muted {
+    border-color: #1c2421;
+    color: #94a3b8;
+  }
+  .hud-header-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding-bottom: 10px;
+    border-bottom: 1px solid #1e2925;
+  }
+  #h-ai-monitor {
+    margin: 0;
+    font-size: 13px;
+    font-weight: 800;
+    color: #2dd4bf;
+    letter-spacing: 0.06em;
+  }
+  .hud-monitor.is-muted #h-ai-monitor {
+    color: #94a3b8;
+  }
+  .hud-narrative {
+    margin: 12px 0 14px;
+    font-size: 13px;
+    line-height: 1.55;
+    color: #d1fae5;
+    min-height: 2.9em;
+    white-space: pre-line;
+  }
+  .hud-monitor.is-muted .hud-narrative {
+    color: #94a3b8;
+  }
+  .hud-meta-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 10px;
+    padding: 10px 12px;
+    background: #0f1513;
+    border: 1px solid #1f2b27;
+    border-radius: 10px;
+    margin-bottom: 16px;
+  }
+  @media (max-width: 640px) {
+    .hud-meta-grid { grid-template-columns: 1fr; }
+  }
+  .hud-meta-cell {
+    display: grid;
+    gap: 2px;
+  }
+  .hud-meta-label {
+    font-size: 11px;
+    color: #64748b;
+  }
+  .hud-meta-val {
+    font-size: 15px;
+    font-weight: 700;
+    color: #f1f5f9;
+    font-variant-numeric: tabular-nums;
+  }
+  .hud-monitor.is-muted .hud-meta-val {
+    color: #cbd5e1;
+  }
+  .hud-prob-list {
+    display: grid;
+    gap: 10px;
+  }
+  .hud-prob-item {
+    display: grid;
+    gap: 5px;
+  }
+  .hud-prob-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 8px 12px;
+    border-radius: 8px;
+    background: #111816;
+    color: #cbd5e1;
+    border: 1px solid #1e2925;
+    font-size: 13px;
+    font-weight: 600;
+  }
+  .hud-prob-row.top-ml {
+    background: #edf2f0;
+    color: #090d0c;
+    font-weight: 800;
+    border-color: #edf2f0;
+  }
+  .hud-prob-row.top-muted {
+    background: #cbd5e1;
+    color: #090d0c;
+    font-weight: 800;
+    border-color: #cbd5e1;
+  }
+  .hud-prob-left {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .hud-active-tag {
+    display: inline-block;
+    padding: 2px 7px;
+    border-radius: 5px;
+    font-size: 11px;
+    font-weight: 800;
+    background: #0f766e;
+    color: #ecfdf5;
+    letter-spacing: 0.05em;
+  }
+  .hud-prob-row.top-ml .hud-active-tag,
+  .hud-prob-row.top-muted .hud-active-tag {
+    background: #090d0c;
+    color: #2dd4bf;
+  }
+  .hud-prob-pct {
+    font-variant-numeric: tabular-nums;
+    font-size: 14px;
+  }
+  .hud-bar-track {
+    height: 6px;
+    background: #151e1b;
+    border-radius: 999px;
+    overflow: hidden;
+  }
+  .hud-bar-fill {
+    height: 100%;
+    width: 0%;
+    border-radius: 999px;
+    transition: width 150ms ease, background-color 150ms ease;
+  }
+  .hud-footer {
+    margin-top: 14px;
+    padding-top: 10px;
+    border-top: 1px solid #1e2925;
+    font-size: 11px;
+    color: #64748b;
+    font-variant-numeric: tabular-nums;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .hud-monitor * {
+      transition: none !important;
+    }
+  }
 </style>
 </head>
 <body>
@@ -316,6 +476,38 @@
       <button class="warn-btn" id="snooze-btn" type="button" disabled>SNOOZE 30 DETIK</button>
       <button id="reset-btn" type="button" disabled>RESET STATE</button>
       <button class="primary" id="arm-toggle-btn" type="button" disabled>ARM / DISARM</button>
+    </div>
+  </section>
+
+  <!-- PANEL MONITORING HUD (DISTRIBUSI PROBABILITAS & KEJUJURAN SUMBER SKOR) -->
+  <section class="card hud-monitor is-muted" id="ai-monitor-panel" aria-labelledby="h-ai-monitor">
+    <div class="hud-header-row">
+      <h2 id="h-ai-monitor">MONITOR KLASIFIKASI (MENUNGGU DATA)</h2>
+      <span id="hud-source-tag" class="hud-meta-label">SOURCE: IDLE</span>
+    </div>
+
+    <div id="hud-narrative" class="hud-narrative">MENUNGGU PAKET TELEMETRI DARI EDGE 1…
+PASTIKAN PERANGKAT AKTIF DAN TERHUBUNG KE BROKER MQTT.</div>
+
+    <div id="hud-meta-grid" class="hud-meta-grid">
+      <div class="hud-meta-cell">
+        <span class="hud-meta-label">DURASI REBAHAN</span>
+        <span id="hud-duration" class="hud-meta-val">000.0 S</span>
+      </div>
+      <div class="hud-meta-cell">
+        <span class="hud-meta-label">WINDOWS / SEQ</span>
+        <span id="hud-seq" class="hud-meta-val">----</span>
+      </div>
+      <div class="hud-meta-cell">
+        <span class="hud-meta-label">SOURCE ENGINE</span>
+        <span id="hud-engine" class="hud-meta-val">OFFLINE / IDLE</span>
+      </div>
+    </div>
+
+    <div id="hud-prob-list" class="hud-prob-list"></div>
+
+    <div id="hud-footer" class="hud-footer">
+      ORIENTASI: PORTRAIT / MOTION: — M/S² · GYRO: — RAD/S / RX INTERVAL: ---- MS (INCL. JITTER)
     </div>
   </section>
 
@@ -610,6 +802,8 @@ function renderEngineAndAIPrediction(data) {
 }
 
 const MAX_POINTS = 60;
+const ALLOWED_POSTURE_LABELS = ["POSISI_DUDUK_SEHAT", "DITARUH_TELUNGKUP", "REBAHAN_AKTIF"];
+const IDLE_STATUSES = new Set(["WAITING", "OFFLINE", "EDGE_OFFLINE", "DISARMED", "SNOOZED"]);
 const STATUS_CLASS = {
   POSISI_DUDUK_SEHAT: "ok",
   DITARUH_TELUNGKUP: "info",
@@ -627,9 +821,241 @@ const $ = (id) => document.getElementById(id);
 let client = null;
 let base = "";
 let currentArmed = true;
+let currentStatus = "WAITING";
+let lastStatusRxMs = 0;
+let lastHudOrder = null;
+let lastNarrativeUpdatePerfMs = 0;
+let lastNarrativeStatus = null;
+let lastEdge1PerfMs = null;
+let lastEdge1RxIntervalMs = null;
 const edges = { edge1: null, edge2: null };
 const overheadHistory = [];
 const logs = [];
+
+function mapStatusToActivePosture(status) {
+  if (status === "POSISI_DUDUK_SEHAT") return "POSISI_DUDUK_SEHAT";
+  if (status === "DITARUH_TELUNGKUP") return "DITARUH_TELUNGKUP";
+  if (status === "REBAHAN_AKTIF" || status === "ALERT_MATA" || status === "TEGURAN_ORTU") {
+    return "REBAHAN_AKTIF";
+  }
+  return null;
+}
+
+function getBarColorForLabel(label, fsmStatus) {
+  if (label === "POSISI_DUDUK_SEHAT") return "#14b8a6";
+  if (label === "DITARUH_TELUNGKUP") return "#38bdf8";
+  if (fsmStatus === "ALERT_MATA" || fsmStatus === "TEGURAN_ORTU") {
+    return "#ef4444";
+  }
+  return "#f59e0b";
+}
+
+function computeHysteresisOrder(cleanProbs) {
+  if (lastHudOrder === null) {
+    lastHudOrder = [...ALLOWED_POSTURE_LABELS].sort((a, b) => cleanProbs[b] - cleanProbs[a]);
+    return lastHudOrder;
+  }
+  const order = [...lastHudOrder];
+  let swapped = true;
+  while (swapped) {
+    swapped = false;
+    for (let i = 0; i < order.length - 1; i++) {
+      const upper = order[i];
+      const lower = order[i + 1];
+      if ((cleanProbs[lower] - cleanProbs[upper]) > 0.02) {
+        order[i] = lower;
+        order[i + 1] = upper;
+        swapped = true;
+      }
+    }
+  }
+  lastHudOrder = order;
+  return lastHudOrder;
+}
+
+function updateHudFooter() {
+  const footer = $("hud-footer");
+  if (!footer) return;
+  const orientText = (currentOrientation || "portrait").toUpperCase();
+  const e1 = edges.edge1;
+  const motionText = e1 && typeof e1.motion === "number" && isFinite(e1.motion) ? e1.motion.toFixed(3) : "—";
+  const gyroText = e1 && typeof e1.gyro === "number" && isFinite(e1.gyro) ? e1.gyro.toFixed(3) : "—";
+  const rxText =
+    typeof lastEdge1RxIntervalMs === "number" && isFinite(lastEdge1RxIntervalMs)
+      ? String(Math.round(lastEdge1RxIntervalMs)).padStart(4, "0")
+      : "----";
+  footer.textContent =
+    `ORIENTASI: ${orientText} / MOTION: ${motionText} M/S² · GYRO: ${gyroText} RAD/S / RX INTERVAL: ${rxText} MS (INCL. JITTER)`;
+}
+
+function renderHudProbRows(orderedLabels, cleanProbs, source, fsmStatus) {
+  const listEl = $("hud-prob-list");
+  if (!listEl) return;
+  const activePosture = mapStatusToActivePosture(fsmStatus);
+  const nodes = orderedLabels.map((label, index) => {
+    const item = document.createElement("div");
+    item.className = "hud-prob-item";
+
+    const row = document.createElement("div");
+    row.className = "hud-prob-row";
+    if (cleanProbs !== null && index === 0) {
+      row.classList.add(source === "ml" ? "top-ml" : "top-muted");
+    }
+
+    const left = document.createElement("div");
+    left.className = "hud-prob-left";
+
+    const nameSpan = document.createElement("span");
+    nameSpan.textContent = label;
+    left.appendChild(nameSpan);
+
+    if (cleanProbs !== null && activePosture === label) {
+      const tag = document.createElement("span");
+      tag.className = "hud-active-tag";
+      tag.textContent = "AKTIF";
+      left.appendChild(tag);
+    }
+
+    const pctSpan = document.createElement("span");
+    pctSpan.className = "hud-prob-pct";
+    if (cleanProbs !== null && typeof cleanProbs[label] === "number") {
+      pctSpan.textContent = `${(cleanProbs[label] * 100).toFixed(1)} %`;
+    } else {
+      pctSpan.textContent = "— %";
+    }
+
+    row.appendChild(left);
+    row.appendChild(pctSpan);
+
+    const track = document.createElement("div");
+    track.className = "hud-bar-track";
+    const fill = document.createElement("div");
+    fill.className = "hud-bar-fill";
+    const pctWidth =
+      cleanProbs !== null && typeof cleanProbs[label] === "number"
+        ? Math.max(0, Math.min(100, cleanProbs[label] * 100))
+        : 0;
+    fill.style.width = `${pctWidth.toFixed(1)}%`;
+    fill.style.backgroundColor = getBarColorForLabel(label, fsmStatus);
+    track.appendChild(fill);
+
+    item.appendChild(row);
+    item.appendChild(track);
+    return item;
+  });
+  listEl.replaceChildren(...nodes);
+}
+
+function clearHudPanel() {
+  lastHudOrder = null;
+  lastNarrativeStatus = null;
+  const panel = $("ai-monitor-panel");
+  if (panel) panel.classList.add("is-muted");
+  const header = $("h-ai-monitor");
+  if (header) header.textContent = "MONITOR KLASIFIKASI (MENUNGGU DATA)";
+  const srcTag = $("hud-source-tag");
+  if (srcTag) srcTag.textContent = "SOURCE: IDLE";
+  const narrative = $("hud-narrative");
+  if (narrative) {
+    narrative.textContent =
+      "MENUNGGU PAKET TELEMETRI AKTIF DARI EDGE 1…\nDISTRIBUSI SKOR DISEMBUNYIKAN SAAT IDLE ATAU TIMEOUT.";
+  }
+  const durEl = $("hud-duration");
+  if (durEl) durEl.textContent = "000.0 S";
+  const seqEl = $("hud-seq");
+  if (seqEl) seqEl.textContent = "----";
+  const engEl = $("hud-engine");
+  if (engEl) engEl.textContent = "OFFLINE / IDLE";
+  renderHudProbRows(ALLOWED_POSTURE_LABELS, null, null, "WAITING");
+  updateHudFooter();
+}
+
+function updateHudPanel(data) {
+  const status = String(data.status || "WAITING");
+  if (IDLE_STATUSES.has(status)) {
+    clearHudPanel();
+    return;
+  }
+
+  const rawSource = data.ml_probabilities_source;
+  const rawProbs = data.ml_probabilities;
+  if (
+    (rawSource !== "ml" && rawSource !== "heuristic" && rawSource !== "veto") ||
+    !rawProbs ||
+    typeof rawProbs !== "object"
+  ) {
+    clearHudPanel();
+    return;
+  }
+
+  const cleanProbs = {};
+  for (const label of ALLOWED_POSTURE_LABELS) {
+    const val = Number(rawProbs[label]);
+    if (!isFinite(val) || val < 0 || val > 1) {
+      clearHudPanel();
+      return;
+    }
+    cleanProbs[label] = val;
+  }
+
+  const panel = $("ai-monitor-panel");
+  const header = $("h-ai-monitor");
+  const srcTag = $("hud-source-tag");
+  const engEl = $("hud-engine");
+
+  if (rawSource === "ml") {
+    if (panel) panel.classList.remove("is-muted");
+    if (header) header.textContent = "AI CONFIDENCE (RANDOM FOREST)";
+    if (srcTag) srcTag.textContent = "SOURCE: ML";
+    if (engEl) engEl.textContent = "RANDOM FOREST";
+  } else if (rawSource === "heuristic") {
+    if (panel) panel.classList.add("is-muted");
+    if (header) header.textContent = "SKOR HEURISTIK (BUKAN AI)";
+    if (srcTag) srcTag.textContent = "SOURCE: HEURISTIC";
+    if (engEl) engEl.textContent = "RULE HEURISTIC";
+  } else {
+    if (panel) panel.classList.add("is-muted");
+    if (header) header.textContent = "HARD-VETO (ATURAN FISIK)";
+    if (srcTag) srcTag.textContent = "SOURCE: VETO";
+    if (engEl) engEl.textContent = "PHYSICAL VETO";
+  }
+
+  const elapsed = Math.max(0, Number(data.lying_elapsed_sec) || 0);
+  const durEl = $("hud-duration");
+  if (durEl) {
+    durEl.textContent = elapsed.toFixed(1).padStart(5, "0") + " S";
+  }
+
+  const seqVal =
+    typeof data.sequence === "number" && isFinite(data.sequence) && data.sequence >= 0
+      ? data.sequence
+      : edges.edge1 && typeof edges.edge1.seq === "number"
+      ? edges.edge1.seq
+      : null;
+  const seqEl = $("hud-seq");
+  if (seqEl) {
+    seqEl.textContent = seqVal !== null ? String(seqVal).padStart(4, "0") : "----";
+  }
+
+  const orderedLabels = computeHysteresisOrder(cleanProbs);
+  renderHudProbRows(orderedLabels, cleanProbs, rawSource, status);
+
+  const nowPerf = performance.now();
+  if (status !== lastNarrativeStatus || (nowPerf - lastNarrativeUpdatePerfMs) >= 1000) {
+    lastNarrativeUpdatePerfMs = nowPerf;
+    lastNarrativeStatus = status;
+    const topLabel = orderedLabels[0];
+    const topPct = (cleanProbs[topLabel] * 100).toFixed(1);
+    const reasonLine = String(data.reason || "OBSERVASI POSTUR AKTIF").toUpperCase();
+    const narrative = $("hud-narrative");
+    if (narrative) {
+      narrative.textContent =
+        `STATE FSM: ${status} · UNGGULAN #1: ${topLabel} (${topPct}%)\n${reasonLine}`;
+    }
+  }
+
+  updateHudFooter();
+}
 
 function setPill(el, text, cls) {
   el.textContent = text;
@@ -757,6 +1183,7 @@ function connect(event) {
   client.on("offline", () => {
     setPill($("conn"), "Terputus", "off");
     setInteractiveEnabled(false);
+    clearHudPanel();
   });
   client.on("error", (err) => setPill($("conn"), `Error: ${err.message}`, "bad"));
   client.on("message", onMessage);
@@ -768,6 +1195,7 @@ function disconnect() {
   setPill($("conn"), "Belum terhubung", "off");
   setInteractiveEnabled(false);
   $("settings").open = true;
+  clearHudPanel();
 }
 
 function onMessage(topicStr, payload) {
@@ -799,6 +1227,7 @@ function onMessage(topicStr, payload) {
 
 function renderStatus(data) {
   const status = String(data.status || "WAITING");
+  currentStatus = status;
   const badge = $("status-badge");
   badge.textContent = status;
   badge.className = STATUS_CLASS[status] || "info";
@@ -807,6 +1236,18 @@ function renderStatus(data) {
     renderOrientationBadge(data.orientation);
   }
   renderEngineAndAIPrediction(data);
+
+  const nowMs = Date.now();
+  const msgAgeMs = typeof data.at_ms === "number" ? Math.abs(nowMs - data.at_ms) : 0;
+  if (!IDLE_STATUSES.has(status) && msgAgeMs <= 10000) {
+    lastStatusRxMs = nowMs;
+    updateHudPanel(data);
+  } else if (!IDLE_STATUSES.has(status) && typeof data.at_ms !== "number") {
+    lastStatusRxMs = nowMs;
+    updateHudPanel(data);
+  } else {
+    clearHudPanel();
+  }
 
   const when = typeof data.at_ms === "number" ? ` (${clock(data.at_ms)})` : "";
   $("status-reason").textContent = String(data.reason || "") + when;
@@ -848,6 +1289,12 @@ function updateEdge(id, data) {
   };
 
   if (id === "edge1") {
+    const nowPerf = performance.now();
+    if (lastEdge1PerfMs !== null) {
+      lastEdge1RxIntervalMs = Math.max(0, nowPerf - lastEdge1PerfMs);
+    }
+    lastEdge1PerfMs = nowPerf;
+
     const previewOrientation = computePreviewOrientation(
       overhead,
       roll,
@@ -855,6 +1302,7 @@ function updateEdge(id, data) {
       activeConfig
     );
     renderOrientationBadge(previewOrientation);
+    updateHudFooter();
 
     $("edge1-overhead").textContent = `${fmt(overhead, 1)} °`;
     $("edge1-roll").textContent = `${fmt(roll, 1)} °`;
@@ -1096,9 +1544,21 @@ async function applyLocalConfig() {
   } catch (_) {}
 }
 
+function checkHudStaleStatus() {
+  if (
+    IDLE_STATUSES.has(currentStatus) ||
+    !lastStatusRxMs ||
+    (Date.now() - lastStatusRxMs) > 10000
+  ) {
+    clearHudPanel();
+  }
+}
+
+clearHudPanel();
 applyLocalConfig();
 drawChart();
 setInterval(tick, 1000);
+setInterval(checkHudStaleStatus, 2000);
 </script>
 </body>
 </html>

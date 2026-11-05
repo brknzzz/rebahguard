@@ -293,6 +293,7 @@ class HybridMLDetectorTests(unittest.TestCase):
         self.assertEqual(detector.detection_mode, "ml")
         self.assertEqual(detector.ml_prediction, "REBAHAN_AKTIF")
         self.assertAlmostEqual(detector.ml_confidence or 0.0, 0.99, places=4)
+        self.assertEqual(detector.ml_probabilities_source, "ml")
 
         # Window 1: HP diletakkan telungkup di meja (overhead=178.0 >= 175.0, motion=0.0, gyro=0.0)
         # Hard-veto WAJIB menang atas prediksi ML REBAHAN_AKTIF (0.99)!
@@ -313,6 +314,12 @@ class HybridMLDetectorTests(unittest.TestCase):
         self.assertIsNone(detector.ml_prediction)
         self.assertIsNone(detector.ml_confidence)
         self.assertEqual(len(detector._ml_buffer), 0)
+        self.assertEqual(len(detector._prob_window), 0)
+        status_msg = detector.build_status(now_ms=NOW_MS + 2000)
+        self.assertEqual(status_msg.ml_probabilities_source, "veto")
+        self.assertEqual(status_msg.ml_probabilities["DITARUH_TELUNGKUP"], 1.0)
+        self.assertEqual(status_msg.ml_probabilities["POSISI_DUDUK_SEHAT"], 0.0)
+        self.assertEqual(status_msg.ml_probabilities["REBAHAN_AKTIF"], 0.0)
 
     def test_temporal_smoothing_single_glitch_does_not_reset_lying_timer(self):
         # ml_smoothing_window=3:
@@ -356,6 +363,119 @@ class HybridMLDetectorTests(unittest.TestCase):
         self.assertEqual(d_next.status, "REBAHAN_AKTIF")
         self.assertAlmostEqual(detector.lying_elapsed_sec, 6.0, places=3)
 
+    def test_predict_with_proba_calls_underlying_predict_proba_only_once(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            csv_valid = tmp / "dataset.csv"
+            model_path = tmp / "posture_rf.joblib"
+            metrics_path = tmp / "metrics.json"
+            TrainModelTests()._write_synthetic_csv(csv_valid, samples_per_session=15, sessions_per_class=3)
+            train_and_evaluate(csv_path=csv_valid, model_out=model_path, metrics_out=metrics_path)
+
+            clf_wrapper = PostureMLClassifier(model_path=model_path, reload_interval_sec=5.0)
+            first_res = clf_wrapper.predict_with_proba(52.0, 8.0, 0.12, 0.06)
+            self.assertIsNotNone(first_res)
+
+            with mock.patch.object(
+                clf_wrapper._model,
+                "predict_proba",
+                wraps=clf_wrapper._model.predict_proba,
+            ) as spy_proba:
+                res = clf_wrapper.predict_with_proba(126.0, 10.0, 0.18, 0.09)
+                self.assertIsNotNone(res)
+                best_label, best_conf, probs = res
+                self.assertEqual(spy_proba.call_count, 1)
+                self.assertEqual(best_label, "REBAHAN_AKTIF")
+                self.assertEqual(best_conf, probs[best_label])
+                self.assertAlmostEqual(sum(probs.values()), 1.0, delta=0.01)
+
+                # Turunan predict() dan predict_proba() juga hanya memanggil predict_proba 1 kali per panggilan
+                spy_proba.reset_mock()
+                pred_only = clf_wrapper.predict(126.0, 10.0, 0.18, 0.09)
+                self.assertEqual(spy_proba.call_count, 1)
+                self.assertEqual(pred_only, (best_label, best_conf))
+
+                spy_proba.reset_mock()
+                proba_only = clf_wrapper.predict_proba(126.0, 10.0, 0.18, 0.09)
+                self.assertEqual(spy_proba.call_count, 1)
+                self.assertEqual(proba_only, probs)
+
+    def test_ml_heuristic_and_idle_probability_sources_in_detector(self):
+        # 1. Saat baru inisialisasi (WAITING) -> ml_probabilities dan ml_probabilities_source adalah None
+        fake_ml = FakeMLClassifier(
+            [
+                ("REBAHAN_AKTIF", 0.90),
+                ("REBAHAN_AKTIF", 0.92),
+                ("REBAHAN_AKTIF", 0.94),
+            ]
+        )
+        cfg = DetectorConfig(ml_smoothing_window=3, ml_confidence_min=0.55)
+        detector = RebahDetector(config=cfg, ml_classifier=fake_ml)
+        st_wait = detector.build_status(now_ms=NOW_MS)
+        self.assertIsNone(st_wait.ml_probabilities)
+        self.assertIsNone(st_wait.ml_probabilities_source)
+
+        # 2. Isi penuh window smoothing (3 window berturut-turut REBAHAN_AKTIF)
+        for i in range(3):
+            ts = NOW_MS + i * 2000
+            detector.accept(_make_edge1_telemetry(i, overhead_deg=125.0, sent_at_ms=ts), now_ms=ts)
+        st_ml = detector.build_status(now_ms=NOW_MS + 4000)
+        self.assertEqual(st_ml.ml_probabilities_source, "ml")
+        self.assertIsNotNone(st_ml.ml_probabilities)
+        self.assertEqual(
+            max(st_ml.ml_probabilities, key=st_ml.ml_probabilities.get),
+            "REBAHAN_AKTIF",
+        )
+        self.assertAlmostEqual(sum(st_ml.ml_probabilities.values()), 1.0, delta=0.01)
+
+        # 3. Saat SNOOZED -> kembali None
+        detector.snooze(now_ms=NOW_MS + 4500)
+        st_snooze = detector.build_status(now_ms=NOW_MS + 4500)
+        self.assertEqual(st_snooze.status, "SNOOZED")
+        self.assertIsNone(st_snooze.ml_probabilities)
+        self.assertIsNone(st_snooze.ml_probabilities_source)
+
+        # 4. Saat reset() -> kembali None
+        detector.reset(now_ms=NOW_MS + 5000)
+        st_reset = detector.build_status(now_ms=NOW_MS + 5000)
+        self.assertIsNone(st_reset.ml_probabilities)
+        self.assertIsNone(st_reset.ml_probabilities_source)
+
+        # 5. Saat mode Rule-Based aktif (use_ml=False) -> source == "heuristic" dan sum == 1.0
+        detector.update_config({"use_ml": False})
+        detector.accept(
+            _make_edge1_telemetry(10, overhead_deg=55.0, sent_at_ms=NOW_MS + 6000),
+            now_ms=NOW_MS + 6000,
+        )
+        st_rule = detector.build_status(now_ms=NOW_MS + 6000)
+        self.assertEqual(st_rule.ml_probabilities_source, "heuristic")
+        self.assertIsNotNone(st_rule.ml_probabilities)
+        self.assertAlmostEqual(sum(st_rule.ml_probabilities.values()), 1.0, delta=0.01)
+        self.assertEqual(
+            max(st_rule.ml_probabilities, key=st_rule.ml_probabilities.get),
+            "POSISI_DUDUK_SEHAT",
+        )
+
+        # 6. Saat DISARMED -> kembali None
+        detector.set_armed(False, now_ms=NOW_MS + 6500)
+        st_disarm = detector.build_status(now_ms=NOW_MS + 6500)
+        self.assertEqual(st_disarm.status, "DISARMED")
+        self.assertIsNone(st_disarm.ml_probabilities)
+        self.assertIsNone(st_disarm.ml_probabilities_source)
+
+        # 7. Aktifkan kembali lalu biarkan timeout (> edge_timeout_sec) -> EDGE_OFFLINE -> kembali None
+        detector.set_armed(True, now_ms=NOW_MS + 7000)
+        detector.accept(
+            _make_edge1_telemetry(11, overhead_deg=55.0, sent_at_ms=NOW_MS + 7000),
+            now_ms=NOW_MS + 7000,
+        )
+        self.assertIsNotNone(detector.build_status(now_ms=NOW_MS + 7000).ml_probabilities)
+        detector.check_timeouts(now_ms=NOW_MS + 20_000)
+        st_offline = detector.build_status(now_ms=NOW_MS + 20_000)
+        self.assertEqual(st_offline.status, "EDGE_OFFLINE")
+        self.assertIsNone(st_offline.ml_probabilities)
+        self.assertIsNone(st_offline.ml_probabilities_source)
+
     def test_posture_ml_classifier_throttles_getmtime_syscalls(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
@@ -366,9 +486,6 @@ class HybridMLDetectorTests(unittest.TestCase):
             train_and_evaluate(csv_path=csv_valid, model_out=model_path, metrics_out=metrics_path)
 
             clf_wrapper = PostureMLClassifier(model_path=model_path, reload_interval_sec=5.0)
-
-            with mock.patch("nodes.posture_service.ml_model.os.path.getmtime", wraps=Path.stat) as _:
-                pass
 
             real_getmtime = __import__("os").path.getmtime
             with mock.patch("nodes.posture_service.ml_model.os.path.getmtime", side_effect=real_getmtime) as m_mtime, \
