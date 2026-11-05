@@ -1,0 +1,80 @@
+{
+  "total_samples": 360,
+  "train_samples": 240,
+  "test_samples": 120,
+  "train_sessions": [
+    "sess_20261105_213702_f0d4",
+    "sess_20261105_213810_8436",
+    "sess_20261105_214022_1f9a",
+    "sess_20261105_214118_40d7",
+    "sess_20261105_214328_dfbc",
+    "sess_20261105_214436_7e47"
+  ],
+  "test_sessions": [
+    "sess_20261105_213916_a235",
+    "sess_20261105_214216_fc7d",
+    "sess_20261105_214539_7d11"
+  ],
+  "session_overlap_count": 0,
+  "feature_columns": [
+    "overhead_deg",
+    "roll_deg",
+    "lean_deg",
+    "motion_rms",
+    "gyro_rms"
+  ],
+  "labels": [
+    "POSISI_DUDUK_SEHAT",
+    "DITARUH_TELUNGKUP",
+    "REBAHAN_AKTIF"
+  ],
+  "random_forest": {
+    "accuracy": 1.0,
+    "macro_f1": 1.0,
+    "confusion_matrix": [
+      [
+        40,
+        0,
+        0
+      ],
+      [
+        0,
+        40,
+        0
+      ],
+      [
+        0,
+        0,
+        40
+      ]
+    ],
+    "feature_importances": {
+      "overhead_deg": 0.5205,
+      "roll_deg": 0.058,
+      "lean_deg": 0.0995,
+      "motion_rms": 0.1526,
+      "gyro_rms": 0.1694
+    }
+  },
+  "rule_based_baseline": {
+    "accuracy": 0.9417,
+    "macro_f1": 0.9412,
+    "confusion_matrix": [
+      [
+        40,
+        0,
+        0
+      ],
+      [
+        0,
+        40,
+        0
+      ],
+      [
+        7,
+        0,
+        33
+      ]
+    ]
+  }
+}
